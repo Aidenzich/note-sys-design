@@ -54,8 +54,8 @@ MySQL 和 PostgreSQL 在處理「更新 (Update)」和「舊版本資料」的�
 | **DDL (改表)** | **非交易式**<br>改表失敗無法 Rollback，可能導致表結構半殘；早期易鎖表。 | **Transactional DDL**<br>`DROP TABLE` 也可以 Rollback！加欄位通常只改 Metadata，瞬間完成。 |
 | **JSON 能力** | 儲存為字串，索引依賴 Generated Column，功能有限。 | **JSONB + GIN 索引**<br>二進位儲存，可直接索引內部欄位，效能直逼 MongoDB。 |
 | **GIS (地圖)** | 功能僅堪用，運算較弱。 | **PostGIS**<br>地表最強開源 GIS 引擎，LBS/地圖應用的唯一選擇。 |
-| **複製機制** | **Binlog (Logical)**<br>傳送 SQL 語句，可能導致主從數據不一致。 | **WAL (Physical)**<br>串流複製底層 Page 變更，保證物理層級的一致性。 |
-
+| **複製機制** | **Binlog (Logical)**<br>傳送 SQL 語句，可能導致主從數據不一致。 | **WAL (Physical)**<br>串流複製底層 Page 變更，保證物理層級的一致性。  |
+> 註：在 Uber 案例之後（Postgres 10 以後），PG 官方其實已經原生支援 Logical Replication，雖然物理層面（Heap + Index）的寫入放大問題依然存在，但複製層面的靈活性已經大幅提升
 
 
 
@@ -70,6 +70,9 @@ MySQL 和 PostgreSQL 在處理「更新 (Update)」和「舊版本資料」的�
 | **NoSQL 能力** | JSON 支援一般，GIS 功能堪用。 | **JSONB + GIN 索引** (類 MongoDB)，**PostGIS** (GIS 王者)。 |
 | **鎖機制** | 容易出現 Gap Lock 導致的死鎖 (Deadlock)。 | 使用 MVCC 的 Snapshot Isolation，讀寫完全不衝突，鎖競爭較少。 |
 | **複製 (Replication) 的機制：邏輯 vs. 物理** | **Binlog (Logical Replication):** MySQL 的複製主要是傳送 SQL 語句（或 Row 變更）。這雖然靈活，但容易出現「主從不一致」的情況（例如主庫執行成功，從庫因為某些原因執行失敗）。 | **WAL (Physical Replication):** PG 的串流複製 (Streaming Replication) 是傳送底層的硬碟 Page 變更 (WAL)。這保證了 Slave 跟 Master 在物理層面上是**一模一樣**的 (Byte-for-Byte Consistency)，資料可靠性極高。 |
+| **UUID/GUID 寫入** | 由於 MySQL 是 Clustered Index，若使用 UUID 這種亂序 ID 作為主鍵，會導致嚴重的 Page Splitting 和寫入效能下降（因為要一直插隊），需要手動透過`UUID_TO_BIN(..., 1)`或改用 snowflake/ULID 解決。在 InnoDB 中，表就是索引，索引就是表 (Clustered Index)。 這意味著，資料行 (Row Data) 是直接儲存在 B+Tree 的葉子節點 (Leaf Nodes) 裡的。 | PG 的 Heap 結構對 UUID 的寫入相對友善：因為 Table 是 Heap 與 Index 是分開的，雖然Index 也會發生 Page Split (隨機I/O)，但這個 B-Tree 節點裡存的只有 (UUID, CTID 指標)，而不包含整行資料（例如你的 JSON 欄位、TEXT 欄位都不在這裡），因此寫入效能影響較小。 而為了完全解決 Page Split 的問題， PG 社群的標準答案是「直接改用有序ID」如 UUID v7 |
+
+
 
 
 ### 為什麼 MySQL 還存在？
@@ -96,4 +99,8 @@ MySQL 和 PostgreSQL 在處理「更新 (Update)」和「舊版本資料」的�
 | **運算需求** | **極端 Update Heavy**<br>頻繁更新同一行資料（避免 PG 的 Vacuum 膨脹問題）。 | **後台報表 / OLAP 分析**<br>涉及複雜 JOIN 查詢、極度重視資料正確性 (Strict Constraints)。 |
 | **團隊因素** | **團隊極度熟悉 MySQL**<br>擁有豐富的維運與調校經驗。 | **需要強大的擴充性**<br>預期未來會有複雜的商業邏輯運算。 |
 
-相較於 PostgreSQL，MySQL 的優勢在於來自 undo log, thread-based 所帶來的低空間使用率和低連線成本，使得 MySQL 確實相對的輕量與快速，但相對的，PostgreSQL 的 append-only 機制雖然帶來較高的空間使用率，但 Rollback 的效能更好，完善的 JOIN 優化器，更使得在複雜查詢或 OLAP 的使用環境效果更佳。另外，PostgreSQL 的 process-based 機制也讓一個 SQL 查詢可以使用多核心完成，卻也帶來需要而外配置 Proxy 如 PgBouncer, AWS RDS Proxy 的必要性， MySQL 則因為 thread 相對輕量，可以在沒配置 Proxy 的情況下，容納更多連線。
+相較於 PostgreSQL，MySQL 的優勢在於來自 `undo log`, `thread-based` 所帶來的低空間使用率和低連線成本，使得 MySQL 確實相對的輕量與快速，但相對的，PostgreSQL 的 `append-only` 機制雖然帶來較高的空間使用率，但 Rollback 的效能更好，完善的 JOIN 優化器，更使得在複雜查詢或 OLAP 的使用環境效果更佳。另外，PostgreSQL 的 process-based 機制也讓一個 SQL 查詢可以使用多核心完成，卻也帶來需要而外配置 Proxy 如 PgBouncer, AWS RDS Proxy 的必要性， MySQL 則因為 thread 相對輕量，可以在沒配置 Proxy 的情況下，容納更多連線。
+
+
+## Appendix
+- [業界實務 MySQL vs PostgreSQL 選型](./mysql-in-big-company.md)
