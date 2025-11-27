@@ -19,7 +19,7 @@
 
 兩者都使用 Multiversion concurrency control (MVCC) 多版本併發控制，它是一種資料庫管理系統的併發控制協議，**當寫入發生時，不會直接修改舊數據，而是建立一個新的版本，舊版本會被保留。讀取時，系統會根據當前事務的隔離級別，從所有版本中選擇一個符合條件的歷史快照版本**。主要優點在於讀取和寫入操作可以並行執行，不會互相衝突，實現了「讀不阻塞寫，寫不阻塞讀」。 
 
-> 註：在 NoSQL 如 Cassandra 中，節點內部的 LSM-Tree 其實就是 MVCC 的一種實現形式，並依賴物理時間戳的 LWW 解決節點間衝突；而在 DynamoDB 中，AWS 實務上已捨棄論文中的 Vector Clock，轉而採用基於 Paxos 共識 (Leader) 的 LWW 策略；至於 Google Spanner 等 NewSQL，則在節點間利用 Paxos + TrueTime (Commit Wait) 確保一致性，並在節點內維持 2PL + MVCC 的機制。
+> 註：在 NoSQL 如 Cassandra 中，節點內部的 LSM-Tree 其實就是 MVCC 的一種實現形式，並依賴物理時間戳的 LWW 解決節點間衝突；而在 DynamoDB 中，AWS 實務上已捨棄論文中的 Vector Clock，轉而採用 LWW 策略；至於 Google Spanner 等 NewSQL，則在節點間利用 Paxos + TrueTime (Commit Wait) 確保一致性，並在節點內維持 2PL + MVCC 的機制。
 
 MySQL 和 PostgreSQL 在處理「更新 (Update)」和「舊版本資料」的方式截然不同。
 
