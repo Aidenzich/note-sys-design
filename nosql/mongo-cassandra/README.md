@@ -128,7 +128,7 @@ MongoDB 實際儲存時是用 BSON (二進位格式)。這讓它比純文字的 
 | **擴展性/維運**<br>(Scalability) | **DynamoDB**<br>(全託管，睡覺也會自動擴展) | **Cassandra**<br>(線性擴展，但要自己加機器) | **MongoDB**<br>(分片維運最痛苦) | Serverless 優勢 |
 
 ### 補充：DynamoDB 是 Masterless 嗎？
-* **Cassandra** 是真正的 **P2P Masterless** (Gossip Protocol)。
+* **Cassandra** 是真正的 **P2P Masterless/Leaderless** (Gossip Protocol)。
 * **DynamoDB** 其實是 **Multi-Leader (Partition-based Leader)**。
   * 它沒有「一台」總 Master。
   * 但它成千上萬個小 Partition 裡，每一個 Partition 都有一個 **Leader** (用 Paxos 演算法選出來的)。
