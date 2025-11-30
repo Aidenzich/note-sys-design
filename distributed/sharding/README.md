@@ -15,4 +15,5 @@
 1.  **MongoDB：** 是最特別的，它**跨了兩欄**。預設是 **Range Based**，但為了效能（避免熱點）可以開啟 **Hashed Sharding**（這是一種特殊的 Range on Hash 策略，不同於 Consistent Hashing）。
 - **Kafka：** 使用的是 **Modulo Hashing**（取模）。這是因為 Kafka 的 Partition 通常是固定的，且必須嚴格保證 `同 Key 順序`，這比「平滑擴容」更重要。
 - **Cassandra / DynamoDB：** 是 **Consistent Hashing** 的教科書代表，專注於高可用與隨時可擴充節點。
+- **Redis Cluster (16384 slots):** 為什麼是 16384？這是因為 Slot 資訊需要透過 Gossip 協議在節點間交換。如果 Slot 太多 (比如 65536)，封包標頭會太大，浪費頻寬；如果太少，叢集擴容的精細度又不夠 。
 - **NewSQL Sharding 選擇**：因為 NewSQL 的「SQL」屬性決定了「範圍查詢 (Range Query)」是其根本，而 Hashed Sharding 對範圍查詢的破壞力太大，因此 NewSQL 通常選擇 **Range Based**。雖然架構上預設是 Range，但為了防止熱點，這些 NewSQL 提供了 **「手動開啟的 Hashed 行為」** 被稱作 `Opt-In Hashing`：Opt-in Hashing 的本質是透過打亂 Partition Key (Primary Key) 的值，讓 Table Data 均勻隨機分佈在所有節點上，以消除寫入熱點並最大化寫入吞吐量；但同時維護 全局二級索引 (Global Secondary Index)，該索引不跟隨 Table Data 分佈，而是依據索引鍵自身的範圍 (Range) 獨立儲存在特定的節點上，藉此保留高效的範圍查詢 (Range Query) 能力
