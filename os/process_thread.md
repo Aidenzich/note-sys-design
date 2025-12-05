@@ -25,7 +25,7 @@ Process 是作業系統分配資源的基本單位，擁有獨立的記憶體空
 
 | 概念 | 地址空間 | 資源 (檔案、信號) | 核心是否可調度 | 錯誤影響 (終止行為) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Process / Sub Process** | **獨立** | 獨立 | 是 | 父行程終止，子行程**可能存活** (被 Init 收養)。 |
+| **Process / Child(Sub) Process** | **獨立** | 獨立 | 是 | 父行程終止，子行程**可能存活** (被 Init 收養)。 |
 | **LWP / Thread** | **共享** | 共享 | **是** (最小調度單元) | 任何一個 Thread/LWP 引起主要錯誤，會導致**整個 Process 崩潰**。 |
 | **Kernel Thread** | **共享** (但無 User Space) | 共享 | **是** | 僅限核心模式，錯誤可能導致**核心恐慌 (Kernel Panic)**。 |
 
@@ -82,7 +82,7 @@ GIL 是一個 Mutex (互斥鎖)。它的作用是保護 Python 直譯器的內�
 對多核執行的影響:
 - CPU 密集型任務： 由於 GIL 的存在，即使您的電腦有 8 個核心，您的 Python Multi-Thread 程式也只會有 一個執行緒 在任何時間點能夠執行 Python 程式碼。
 - 結果： 這些執行緒被迫在單一核心上不斷地進行快速的交錯執行 (Interleaving)，而不是在多個核心上平行執行 (Parallelism)。這增加了上下文切換的開銷，反而可能導致速度變慢。 
-- GIL 對 Asynchronous I/O 的影響： 在單個主核心的Event Loop 不會有影響(因為仍是在一個 thread 內)，但是多個核心的背景 Worker Pool 仍會受到 GIL 的限制。
+- GIL 對 Asynchronous I/O 的影響： 在單個主核心的Event Loop 不會有影響(因為仍是在一個 thread 內)，但是多個核心的背景 Work Thread Pool 仍會受到 GIL 的限制 (若是 Process Pool 則不受此限)。
 
 
 ### Multi-Thread vs Goroutine
@@ -98,3 +98,12 @@ Goroutine 其實算是基於 Multi-Thread 建立的一種更高階（或更輕�
 
 
 > Go Scheduler 本身不是運行在某一個特定的 OS Thread 上，它是 Go Runtime 的一部分，它的邏輯和排程決策是分散在所有正在運行的 OS Thread (N) 和邏輯核心 (P) 上的。
+
+
+### Context Switching
+
+Context Switch 會將 CPU 的暫存器狀態<span style="color: orange;">保存 (Save) 到記憶體(Memory)中 </span>，來記憶不同 Process/ Thread 的暫存器狀態。
+- Thread Switch: 連「記憶體地圖（Page Table）」都沒動，所有的記憶體都在原本的地方，完全共享
+- Process Switch: 更新 CPU 的「記憶體對應表指標（CR3 Register）」，指向 Process B 的 Page Table。Process A 的記憶體仍維持原來的物理位置。
+
+> 📌 : Context Switch 只動 CPU 的暫存器狀態，而不是把整個程式的記憶體搬移 (Move) 到別處。
