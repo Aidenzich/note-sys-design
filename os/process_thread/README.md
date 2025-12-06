@@ -64,7 +64,7 @@ Process 是作業系統分配資源的基本單位，擁有獨立的記憶體空
 | **故障隔離** | - | 差 (一個崩潰，全 Process 崩潰) | **最佳** (Process 間完全獨立) | **極差** (主循環崩潰，全 Process 崩潰) | - | - |
 | **典型用途** | 簡單、非 I/O 任務 | CPU 密集型 和 I/O 密集型 皆可受益 | CPU 密集型 任務，可充分利用多核實現平行性 | **超高 I/O 密集型** (高頻率網路連線) | - | - |
 
-
+> Node.js 或 Redis 就是典型的單執行緒 Async I/O
 
 
 
@@ -103,7 +103,9 @@ Goroutine 其實算是基於 Multi-Thread 建立的一種更高階（或更輕�
 ### Context Switching
 
 Context Switch 會將 CPU 的暫存器狀態<span style="color: orange;">保存 (Save) 到記憶體(Memory)中 </span>，來記憶不同 Process/ Thread 的暫存器狀態。
-- Thread Switch: 連「記憶體地圖（Page Table）」都沒動，所有的記憶體都在原本的地方，完全共享
-- Process Switch: 更新 CPU 的「記憶體對應表指標（CR3 Register）」，指向 Process B 的 Page Table。Process A 的記憶體仍維持原來的物理位置。
+- Thread Switch: 連「記憶體地圖（Page Table）」都沒動，所有的記憶體都在原本的地方，（因為 Page Table 沒變，TLB (Translation Lookaside Buffer) 不用清空，Cache Hit rate 維持高檔）
+- Process Switch: 更新 CPU 的「記憶體對應表指標（CR3 Register）」，指向 Process B 的 Page Table。Process A 的記憶體仍維持原來的物理位置。 另外影響更大的代價是：TLB (Translation Lookaside Buffer) Flush。 當 CR3 改變（切換 Page Table），CPU 內部的 TLB（快取虛擬地址到物理地址的 Cache）會失效（除非有 PCID 機制）。這導致切換後的一段時間內，CPU 存取記憶體會變慢，因為都要重新查表。
 
 > 📌 : Context Switch 只動 CPU 的暫存器狀態，而不是把整個程式的記憶體搬移 (Move) 到別處。
+
+
