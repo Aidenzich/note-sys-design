@@ -69,4 +69,112 @@ questions:
       - text: LSI 與 GSI 都擁有獨立的容量設定
         rationale: LSI 並沒有獨立的容量，它會搶佔 Base Table 的 throughput。
         isCorrect: false
-    hint: 想像 LSI 是寄生在主表上的，
+    hint: 想像 LSI 是寄生在主表上的，吃主表的資源；而 GSI 是搬出去自己住的，有自己的資源額度。
+
+  - questionNumber: 5
+    question: LSI 針對每個 Partition item collection (包含主表資料與所有 LSI 資料) 有一個特殊的大小限制，請問是多少？
+    imageUrl: null
+    answerOptions:
+      - text: 10 GB
+        rationale: 這是 DynamoDB 對 LSI 的硬性限制。如果單一 Partition Key 下的資料總量（含 LSI）超過 10GB，寫入會失敗。
+        isCorrect: true
+      - text: 100 GB
+        rationale: 10GB 才是正確的限制閾值。
+        isCorrect: false
+      - text: 1 TB
+        rationale: 單一 Partition 不可能存放到 1TB 的資料。
+        isCorrect: false
+      - text: 沒有限制
+        rationale: GSI 理論上單一 Partition 沒有大小限制（會自動分裂），但 LSI 有嚴格的 10GB 限制。
+        isCorrect: false
+    hint: 這個限制相對較小，是使用 LSI 時必須特別小心的地雷，通常是以 'GB' 為單位的雙位數。
+
+  - questionNumber: 6
+    question: 如果您的應用程式需要「強一致性讀取 (Strongly Consistent Reads)」，通常只能選擇哪種索引？
+    imageUrl: null
+    answerOptions:
+      - text: Global Secondary Index (GSI)
+        rationale: GSI 在 DynamoDB 中僅支援「最終一致性 (Eventual Consistency)」，因為資料複製到 GSI 是非同步的。
+        isCorrect: false
+      - text: Local Secondary Index (LSI)
+        rationale: LSI 支援強一致性讀取，因為它與主表資料位於同一物理分區，可以確保讀到最新寫入的資料。
+        isCorrect: true
+      - text: 兩者都支援強一致性
+        rationale: GSI 不支援強一致性讀取。
+        isCorrect: false
+      - text: 兩者都不支援，只有查主表才可以
+        rationale: LSI 是支援強一致性的，這也是選用 LSI 的主要原因之一。
+        isCorrect: false
+    hint: 因為資料複製需要時間，跨機器的索引 (GSI) 很難做到當下立即一致，但放在一起的索引 (LSI) 就可以。
+
+  - questionNumber: 7
+    question: 關於 Sort Key (SK)，LSI 與 GSI 的共通點是什麼？
+    imageUrl: null
+    answerOptions:
+      - text: 兩者都必須使用與 Base Table 相同的 Sort Key
+        rationale: 索引的目的就是為了提供不同的排序或查詢方式，所以通常會使用「不同」的 Sort Key。
+        isCorrect: false
+      - text: 兩者都可以使用與 Base Table 不同的 Sort Key
+        rationale: 無論是 LSI 還是 GSI，它們存在的主要目的之一就是允許您使用不同的欄位來排序或篩選資料。
+        isCorrect: true
+      - text: LSI 必須相同，但 GSI 可以不同
+        rationale: LSI 的 Partition Key 必須相同，但 Sort Key 可以（也應該）不同，否則建立索引就沒意義了。
+        isCorrect: false
+      - text: GSI 必須相同，但 LSI 可以不同
+        rationale: GSI 的 PK 和 SK 都可以不同。
+        isCorrect: false
+    hint: 建立 Secondary Index 的目的，通常就是為了用「另一個欄位」來排序或搜尋。
+
+  - questionNumber: 8
+    question: 在設計 DynamoDB 表結構時，如果您發現某個查詢模式需要根據「非主鍵」欄位進行範圍搜尋 (Range Query)，且該欄位在不同 Partition Key 之間沒有關聯，最適合用哪種索引？(假設資料量不大且不想額外付費 GSI)
+    imageUrl: null
+    answerOptions:
+      - text: Local Secondary Index (LSI)
+        rationale: 如果在同一個 Partition Key 下進行範圍搜尋，且希望節省 GSI 的額外儲存與吞吐成本（共用主表），LSI 是一個可行的選擇。
+        isCorrect: true
+      - text: Global Secondary Index (GSI)
+        rationale: 雖然 GSI 也能做到，但題目提到了「不想額外付費 GSI」且查詢是在 Partition 內，LSI 會是更符合成本效益的答案。
+        isCorrect: false
+      - text: Scan 操作
+        rationale: Scan 會掃描整張表，效率極低且成本高，通常不是優先選項。
+        isCorrect: false
+      - text: 無法達成
+        rationale: 這是 LSI 的標準使用場景之一。
+        isCorrect: false
+    hint: 題目強調了「範圍搜尋」且在「不同 Partition Key 之間沒有關聯」，暗示查詢是侷限在單一 Partition 內的。
+
+  - questionNumber: 9
+    question: 哪種索引在刪除 Base Table 的資料時，不需要額外花費寫入容量 (WCU) 來刪除索引資料？
+    imageUrl: null
+    answerOptions:
+      - text: Local Secondary Index (LSI)
+        rationale: LSI 與主表共享 WCU，刪除主表項目時，系統會自動處理 LSI 的刪除，雖然會消耗共享的 WCU，但不是「額外」配置的。不過嚴格來說，兩者都會消耗 WCU。但此題意指架構上，LSI 的資料與主表綁定，GSI 則是異步解耦。更精確地說，LSI 的項目刪除是原子性的。但如果題目是問「哪種索引在 Base Table 項目被刪除時，索引項目也會被自動刪除？」，兩者都是。若問成本，GSI 的刪除會消耗 GSI 自己的 WCU。
+        isCorrect: false
+      - text: 兩者都需要消耗 WCU
+        rationale: 無論是 LSI 還是 GSI，當主表資料被刪除，索引中的對應資料也需要被刪除，這個操作都會產生寫入成本。
+        isCorrect: true
+      - text: Global Secondary Index (GSI)
+        rationale: GSI 的刪除同樣需要消耗 GSI 自身配置的 WCU。
+        isCorrect: false
+      - text: 兩者都不需要
+        rationale: DynamoDB 中所有的寫入操作（包含刪除）都需要消耗容量單位。
+        isCorrect: false
+    hint: 天下沒有白吃的午餐，只要資料有變動（包含刪除），對應的索引都需要更新，這就需要算力。
+
+  - questionNumber: 10
+    question: 總結來說，在現代 DynamoDB 設計中，由於靈活性與擴展性的考量，通常建議優先考慮哪種索引（除非有強一致性需求）？
+    imageUrl: null
+    answerOptions:
+      - text: Global Secondary Index (GSI)
+        rationale: GSI 提供了更好的擴展性（無 10GB 限制）、靈活性（可隨時建立、PK 可不同）以及獨立的效能控制，因此是大多數場景的首選。
+        isCorrect: true
+      - text: Local Secondary Index (LSI)
+        rationale: LSI 由於 10GB 限制以及無法事後建立的僵固性，在現代設計中使用頻率較低，通常僅用於必須強一致性的場景。
+        isCorrect: false
+      - text: 兩者建議程度相同
+        rationale: 由於 LSI 的限制較多，GSI 通常被視為更通用的解決方案。
+        isCorrect: false
+      - text: 都不建議使用，應盡量只用主鍵
+        rationale: 雖然 Single Table Design 強調善用主鍵，但 Secondary Index 是解決 Access Pattern 不可或缺的工具。
+        isCorrect: false
+    hint: 考慮到「不要把路走死」（未來可能要改索引）以及「不要撐爆房間」（Partition Size 限制），哪種選擇比較安全？
