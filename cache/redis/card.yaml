@@ -1,0 +1,46 @@
+# 主題：Redis 分布式架構權威指南 (Sentinel vs Cluster & Beyond)
+# 來源：Redis 分布式架構權威指南筆記
+
+cards:
+  # --- 1. 基礎架構與原理 ---
+  - front: "Redis 單執行緒模型（Single-Threaded）的主要優勢與劣勢是什麼？"
+    back: "優勢：避免了 Context Switch 和鎖競爭（Lock Contention），在 CPU 密集度低的指令下吞吐量極高。\n劣勢：無法利用多核心 CPU，單機處理能力有上限（Scale-up 瓶頸），且長指令（如 FLUSHALL）會阻塞整個服務。"
+
+  - front: "Redis 的預設複製（Replication）機制是同步還是非同步？這對 CAP 理論意味著什麼？"
+    back: "是非同步（Asynchronous）。\n這意味著 Redis 預設是 AP 系統（保證可用性）。Master 回應寫入成功時，資料可能尚未傳到 Replica，若此時 Master 崩潰，會發生數據丟失。"
+
+  - front: "Redis Sentinel（哨兵模式）的主要職責是什麼？它負責資料分片嗎？"
+    back: "職責：高可用性（HA）與服務發現（Service Discovery）。\n注意：它 **不負責** 資料分片（Sharding），所有資料仍受限於單機記憶體。"
+
+  - front: "Redis Cluster（叢集模式）解決了 Sentinel 無法解決的什麼問題？"
+    back: "解決了「水平擴展」（Scale-out）問題。\n它透過 Hash Slot 機制將資料分散儲存，突破了單機記憶體與寫入頻寬的限制，同時內建了 HA 機制。"
+
+  # --- 2. 演算法與內部機制 ---
+  - front: "在 Sentinel 中，SDOWN（主觀下線）與 ODOWN（客觀下線）有何不同？"
+    back: "SDOWN：單個 Sentinel 認為 Master 掛了。\nODOWN：達到 Quorum 數量的 Sentinel 都認為 Master 掛了（這是觸發 Failover 的必要條件）。"
+
+  - front: "Redis Cluster 使用什麼演算法進行資料分片？為什麼 Slot 數量是 16,384？"
+    back: "使用 Hash Slot 演算法：`CRC16(key) mod 16384`。\n選擇 16384 是因為它是頻寬與分片粒度的平衡點。若 Slot 太多（如 65535），Gossip 封包中的 Bitmap 會太大，導致網路擁塞。"
+
+  - front: "Redis Cluster 客戶端收到 MOVED 與 ASK 錯誤時，行為有何不同？"
+    back: "MOVED（永久重定向）：Slot 歸屬已變更，客戶端應更新本地 Slot Map 並重試。\nASK（臨時重定向）：Slot 正在遷移中，客戶端應先發送 ASKING 指令給目標節點，再發送操作指令，但不更新 Slot Map。"
+
+  - front: "為什麼在微服務架構大規模使用 Redis 時，通常需要引入 Proxy（如 Envoy）？"
+    back: "解決「連線數風暴（Connection Storm）」問題。\nProxy 提供連線多路復用（Connection Multiplexing），將後端 Redis 的連線數從 N（客戶端數）降低到 M（Proxy 數），減少 Redis CPU 在連線管理上的消耗。"
+
+  # --- 3. 客戶端與新技術 ---
+  - front: "Java 客戶端 Jedis 與 Lettuce 的核心差異為何？"
+    back: "Jedis：同步阻塞 IO，非執行緒安全（需搭配連線池）。\nLettuce：基於 Netty 的非同步非阻塞 IO，執行緒安全（單一連線可支援高併發），資源利用率較高。"
+
+  - front: "什麼是 Redis 的「腦裂（Split-Brain）」問題？如何緩解？"
+    back: "網路分區導致出現兩個 Master，舊 Master 在少數派分區仍接受寫入，這些數據在網路恢復後會丟失。\n緩解：配置 `min-replicas-to-write`，強制 Master 在 Replica 不足時拒絕寫入。"
+
+  - front: "Dragonfly 或 KeyDB 這類新興引擎主要試圖解決 Redis 的什麼痛點？"
+    back: "解決 Redis 的「單執行緒」物理極限。\n它們採用多執行緒（Shared-nothing 架構），大幅提升單機吞吐量，試圖用垂直擴展（Scale-up）來取代複雜的水平擴展（Scale-out）。"
+
+  # --- 4. 面試陷阱題 (System Design) ---
+  - front: "面試題：我可以同時混合使用 Redis Sentinel 和 Redis Cluster 嗎？"
+    back: "不行，而且不需要。\nSentinel 是為單機主從設計的 HA 方案；Cluster 本身已經內建了基於 Gossip 的故障偵測與轉移機制。混用不僅冗餘，技術上也無法協同工作。"
+
+  - front: "面試題：如何決定該用 Sentinel 還是 Cluster？（決策矩陣）"
+    back: "1. 資料量 < 單機記憶體 (e.g., 64GB) 且 QPS 單機扛得住 -> 選 **Sentinel** (維護簡單)。\n2. 資料量超大 或 寫入併發極高 -> 選 **Cluster** (水平擴展)。"

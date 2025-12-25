@@ -1,0 +1,43 @@
+# 主題：系統設計面試速成指南 (Delivery Framework)
+# 來源：FAANG Managers & Staff Engineers
+
+cards:
+  # --- 1. 整體策略與心態 ---
+  - front: "在系統設計面試中，中階候選人最常見的失敗原因是什麼？"
+    back: "未能交付一個「可運作的系統」。\n通常被誤認為是時間管理問題，但核心往往是未能專注於正確的事情，導致在細節中迷失方向。"
+
+  - front: "根據「交付框架」，系統設計面試建議的 6 個步驟順序為何？"
+    back: "1. 需求分析 (Requirements) ~5 min\n2. 核心實體 (Core Entities) ~2 min\n3. API/系統介面 (System Interface) ~5 min\n4. 資料流 (Data Flow) [可選] ~5 min\n5. 高階設計 (High Level Design) ~10-15 min\n6. 深入探討 (Deep Dives) ~10 min"
+
+  # --- 2. 需求分析 (Requirements) ---
+  - front: "在需求分析階段，應如何區分「功能性需求」與「非功能性需求」？"
+    back: "1. 功能性需求：使用者/客戶端應該能夠做什麼（例如：發布推文）。應保持針對性，選出最重要的前 3 項。\n2. 非功能性需求：系統的品質與限制（例如：高可用性、低延遲）。應盡可能「量化」。"
+
+  - front: "在定義「非功能性需求」時，有哪些關鍵面向可以考慮？（請列舉 3-5 個）"
+    back: "1. CAP 定理 (Consistency vs Availability)\n2. 擴展性 (Scalability)\n3. 延遲 (Latency)\n4. 持久性 (Durability)\n5. 安全性 (Security)\n6. 容錯性 (Fault Tolerance)"
+
+  - front: "關於「容量估算」(Capacity Estimation)，這份指南的建議是什麼？"
+    back: "不要為了計算而計算。\n只有在計算結果會「直接影響設計決策」（例如：決定是否需要分片 Sharding）時才進行。否則告訴面試官你會在必要時再計算。"
+
+  # --- 3. 實體與 API (Entities & API) ---
+  - front: "為什麼建議先列出「核心實體」(Core Entities) 而不是完整的資料庫 Schema？"
+    back: "因為在初期「你不知道你不知道什麼」。\n從核心名詞開始（如 User, Tweet）可以快速建立共識；過早陷入欄位細節會浪費時間且難以修改。"
+
+  - front: "在選擇 API 協定時，REST、GraphQL 與 RPC 的使用時機為何？"
+    back: "1. REST：預設選擇，適用於大多數面試場景。\n2. GraphQL：當客戶端多樣化，需避免 Over/Under-fetching 時。\n3. RPC (gRPC)：當效能至關重要，用於內部服務對服務 (Service-to-Service) 通訊時。"
+
+  - front: "在設計 API 時，關於「安全性」與「參數傳遞」的一個重要原則是什麼？"
+    back: "永遠不要依賴 Request Body 中的敏感資訊（如 User ID）。\n當前使用者應該從 Header 中的 Authentication Token 推導出來。"
+
+  # --- 4. 設計與深入探討 (HLD & Deep Dives) ---
+  - front: "在「高階設計」(High Level Design) 階段，候選人應避免的最大陷阱是什麼？"
+    back: "過早疊加複雜度。\n應專注於設計一個「能滿足核心功能性需求」的簡單版本，先確保系統能運作，稍後再於 Deep Dive 階段解決擴展性或效能問題。"
+
+  - front: "在繪製高階架構圖時，什麼時候是定義資料庫 Schema 欄位的好時機？"
+    back: "當請求流經資料庫組件時。\n可以直接在架構圖的資料庫旁邊標註相關欄位。不需要寫出所有欄位（如 email/password），只寫與設計邏輯相關的欄位。"
+
+  - front: "在「深入探討」(Deep Dives) 階段，資深 (Senior) 與資淺候選人的表現有何不同？"
+    back: "資淺：等待面試官指出問題並引導。\n資深：主動識別瓶頸（如擴展性、邊緣情況）、提出權衡（Trade-offs）並引導討論。"
+
+  - front: "在與面試官溝通時，候選人常犯的一個軟實力錯誤是什麼？"
+    back: "試圖蓋過面試官的聲音（講個不停）。\n必須留出空間讓面試官提問，因為他們的問題通常帶有引導性訊號，錯過這些訊號可能導致面試失敗。"

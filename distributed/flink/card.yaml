@@ -1,0 +1,63 @@
+# Flashcard 測試資料
+# 主題：Apache Flink 核心面試題
+# 難度：中高級 (大數據工程師/後端工程師)
+
+cards:
+  - front: "Flink 與 Spark Streaming 在處理模型上有什麼本質區別？"
+    back: |
+        1. **Flink**：是 **Native Streaming (原生流處理)**，事件驅動 (Event-driven)，來一條處理一條。
+        2. **Spark Streaming**：是 **Micro-batch (微批次)**，將流切成小的時間片 (RDD) 進行批次處理。
+        
+        Flink 延遲更低 (毫秒級)，且對狀態管理 (State) 的支援更強。
+
+  - front: "Flink 中的 JobManager 和 TaskManager 分別負責什麼？"
+    back: |
+        * **JobManager (Master)**：負責協調 Job 的執行、調度 Task、協調 Checkpoint、以及故障恢復。
+        * **TaskManager (Worker)**：負責執行具體的 Task (計算任務)、緩存數據與交換數據流。
+
+  - front: "Flink 支援哪三種時間語義 (Time Semantics)？"
+    back: |
+        1.  **Event Time (事件時間)**：事件實際發生的時間 (通常由 Source 中的時間戳決定)。這是最準確的。
+        2.  **Processing Time (處理時間)**：事件到達 Flink 機器並被處理的系統時間。效率最高但結果不確定。
+        3.  **Ingestion Time (攝入時間)**：事件進入 Flink Source 的時間。
+
+  - front: "什麼是 Watermark (水位線)？它的作用是什麼？"
+    back: |
+        Watermark 是一種特殊的信號 (帶有時間戳 T)，插入在數據流中。
+        
+        * **定義**：當算子收到時間戳為 T 的 Watermark，代表「**所有時間小於 T 的事件都已經到齊了**，不會再有更早的數據」。
+        * **作用**：主要用於在 **Event Time** 模式下處理 **亂序數據 (Out-of-Order Data)**，決定何時觸發窗口計算。
+
+  - front: "Flink 常用的 Window (窗口) 有哪幾種？"
+    back: |
+        1.  **Tumbling Window (滾動窗口)**：固定大小，時間區間**不重疊** (例如：每 5 分鐘)。
+        2.  **Sliding Window (滑動窗口)**：固定大小，時間區間**有重疊** (例如：每 5 分鐘統計過去 1 小時的數據)。
+        3.  **Session Window (會話窗口)**：沒有固定時間，根據**活動間隔 (Gap)** 切分 (例如：用戶超過 30 分鐘沒動作就算新 Session)。
+
+  - front: "Checkpoint 和 Savepoint 有什麼區別？"
+    back: |
+        * **Checkpoint**：由 Flink **自動觸發**，用於故障恢復 (Failover)，生命週期由 Flink 管理，作業取消時通常會刪除。
+        * **Savepoint**：由用戶 **手動觸發**，用於版本升級、A/B 測試或集群遷移，格式標準化，不會自動刪除。
+
+  - front: "Flink 是如何實現 Exactly-once (精確一次) 語義的？"
+    back: |
+        Flink 使用 **Chandy-Lamport 演算法** 的變體（ABS, Asynchronous Barrier Snapshotting）。
+        
+        核心機制是在數據流中插入 **Barrier**。當所有 Operator 收到 Barrier 時，會對自己的狀態做快照 (Snapshot) 並存入持久化存儲 (如 HDFS/S3)。如果失敗，系統回滾到上一次成功的 Checkpoint。
+
+  - front: "Flink 的 State Backend (狀態後端) 主要有哪兩類？分別適用什麼場景？"
+    back: |
+        1.  **HashMapStateBackend (基於內存)**：狀態存在 JVM Heap 中。速度快，但受內存大小限制。適合狀態較小的 Job。
+        2.  **EmbeddedRocksDBStateBackend (基於 RocksDB)**：狀態存在本地磁碟的 RocksDB 資料庫中。速度稍慢 (需序列化)，但能支援超大狀態 (TB 級別)。適合大狀態、長窗口的 Job。
+
+  - front: "什麼是 Flink 中的 Backpressure (背壓)？Flink 如何處理？"
+    back: |
+        **背壓**：指下游處理速度慢於上游發送速度，導致數據堆積。
+        
+        **處理方式**：Flink 不需要特殊的機制來丟棄數據。它使用 **Credit-based Flow Control (基於信用的流量控制)**。下游會告訴上游自己還有多少 Buffer (Credit)，如果沒了，上游就會停止發送。壓力會自然地一層層往回傳遞到 Source。
+
+  - front: "Flink CEP 是什麼？"
+    back: |
+        **Complex Event Processing (複雜事件處理)**。
+        
+        它是一個庫，允許你在無限的數據流中定義「模式 (Pattern)」（例如：A 事件發生後，10 秒內 B 事件沒發生）。常用於風控、網路入侵檢測、即時行銷。

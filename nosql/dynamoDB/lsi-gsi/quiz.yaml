@@ -1,0 +1,72 @@
+questions:
+  - questionNumber: 1
+    question: 關於 Local Secondary Index (LSI) 的 Partition Key (PK)，下列敘述何者正確？
+    imageUrl: null
+    answerOptions:
+      - text: LSI 的 PK 必須與原始資料表 (Base Table) 的 PK 相同
+        rationale: LSI 的定義就是「Local」，意味著它被限制在原始資料表的同一個 Partition 內，因此必須共用相同的 Partition Key。
+        isCorrect: true
+      - text: LSI 的 PK 可以是任意欄位，不需與 Base Table 相同
+        rationale: 如果 PK 可以不同，資料就會分佈到不同的 Partition，這就變成了 Global Secondary Index (GSI) 的特性。
+        isCorrect: false
+      - text: LSI 不需要 Partition Key，只需要 Sort Key
+        rationale: DynamoDB 的索引結構必須包含 Partition Key，LSI 只是重複使用了 Base Table 的 PK。
+        isCorrect: false
+      - text: LSI 的 PK 必須是 Base Table 的 Sort Key
+        rationale: LSI 的 PK 必須與 Base Table 的 PK 相同，而不是 Sort Key。
+        isCorrect: false
+    hint: 回想一下「Local」這個詞，它意味著索引資料與原始資料存放在同一個「位置」或分區中。
+
+  - questionNumber: 2
+    question: 如果您需要在資料表建立之後，隨時新增或刪除一個索引，您應該選擇哪種類型？
+    imageUrl: null
+    answerOptions:
+      - text: Global Secondary Index (GSI)
+        rationale: GSI 可以在 Table 建立後的任何時間點進行新增或刪除，提供了極大的靈活性。
+        isCorrect: true
+      - text: Local Secondary Index (LSI)
+        rationale: LSI 只能在建立 Table 的「當下」同時定義，一旦 Table 建立完成就無法再新增或刪除 LSI。
+        isCorrect: false
+      - text: 兩者都可以隨時建立
+        rationale: 只有 GSI 支援隨時建立；LSI 有嚴格的建立時間限制。
+        isCorrect: false
+      - text: 兩者都只能在建立 Table 時設定
+        rationale: 這是 LSI 的限制，但 GSI 沒有這個限制。
+        isCorrect: false
+    hint: 有一種索引跟原始資料表的結構綁定較深，因此必須一開始就決定好；另一種則相對獨立。
+
+  - questionNumber: 3
+    question: 當您的查詢條件不包含原始資料表的 Partition Key，而需要跨越所有分區搜尋資料時，必須使用哪種索引？
+    imageUrl: null
+    answerOptions:
+      - text: Local Secondary Index (LSI)
+        rationale: LSI 的查詢範圍僅限於單一 Partition，無法進行跨 Partition 的全域搜尋。
+        isCorrect: false
+      - text: Global Secondary Index (GSI)
+        rationale: GSI 允許使用完全不同的 Partition Key，因此可以跨越原始資料表的 Partition 界線，進行全域查詢。
+        isCorrect: true
+      - text: Primary Index
+        rationale: Primary Index (Base Table) 的查詢必須提供 Partition Key，否則只能進行效率極低的 Scan 操作。
+        isCorrect: false
+      - text: Hash Range Index
+        rationale: 這只是主鍵結構的一種稱呼，並不能解決跨 Partition 查詢且不提供 PK 的問題。
+        isCorrect: false
+    hint: 既然要「跨越」原本的圍牆 (Partition)，就需要一個「全域 (Global)」的視角。
+
+  - questionNumber: 4
+    question: 關於索引對讀寫容量單位 (RCU/WCU) 的消耗，下列何者描述正確？
+    imageUrl: null
+    answerOptions:
+      - text: LSI 與 Base Table 共用容量；GSI 擁有獨立的容量設定
+        rationale: LSI 因為存在於同一分區，直接消耗 Base Table 的容量；GSI 資料獨立儲存，因此需要配置獨立的 RCU/WCU。
+        isCorrect: true
+      - text: LSI 擁有獨立的容量設定；GSI 與 Base Table 共用容量
+        rationale: 剛好相反。GSI 才是獨立計算容量的。
+        isCorrect: false
+      - text: LSI 與 GSI 都必須與 Base Table 共用容量
+        rationale: GSI 是獨立配置容量的，這能避免索引的熱點影響到主表的效能。
+        isCorrect: false
+      - text: LSI 與 GSI 都擁有獨立的容量設定
+        rationale: LSI 並沒有獨立的容量，它會搶佔 Base Table 的 throughput。
+        isCorrect: false
+    hint: 想像 LSI 是寄生在主表上的，

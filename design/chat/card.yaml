@@ -1,0 +1,81 @@
+# Chat 系統設計 (System Design) - 權威指南
+
+cards:
+  - front: |
+      在 Chat 系統的高併發設計中，為了降低握手開銷與延遲，通常採用什麼協議？
+      以及 Dual-Path Routing (雙路徑路由) 架構的核心概念是什麼？
+    back: |
+      1. **協議**：採用 **WebSocket** 取代 Long Polling。
+      2. **Dual-Path Routing**：
+         * **熱路徑 (Hot Path)**：利用 **Redis (Pub/Sub)** 實現毫秒級的即時轉發 (WebSocket 互推)。
+         * **冷路徑 (Cold Path)**：透過 **Kafka** 非同步寫入 **Cassandra/ScyllaDB** 確保資料持久化。
+
+  - front: |
+      為什麼需要將 Presence Server (狀態伺服器) 獨立出來？
+      它是如何解耦「狀態擴散」與「核心聊天」的？
+    back: |
+      **關鍵原因**：狀態變更 (上線/下線) 的 **Fan-out (擴散) 成本極高**。
+      例如 User A 下線，需通知 1000 個好友。若將此計算放在 Chat Service，會阻塞核心聊天訊息。
+
+      **解耦方式**：
+      * **Chat Service**：只處理 WebSocket 斷線，更新 User 自身狀態。
+      * **Presence Server**：專門負責「通知好友」這種高負載的擴散工作。
+
+  - front: |
+      在 Storage Design 中，Discord、Facebook Messenger 和 WhatsApp 各自採用了什麼獨特的資料庫技術？
+    back: |
+      * **Discord**: **ScyllaDB** (C++ Rewrite of Cassandra)。利用 Partition Key (Channel) + Clustering Key (MessageID)。
+      * **Facebook Messenger**: **HBase** (CP 模型)。為了追求強一致性，棄用 Cassandra 改用 HBase (Iris 架構/ZippyDB)。
+      * **WhatsApp**: **Mnesia** (Erlang Native)。唯一的異類，使用與 Application Process 緊密結合的 Row-based DB。
+
+  - front: |
+      為什麼 Facebook Messenger 從 Cassandra (AP) 轉向 HBase (CP)？
+      而 Discord 卻選擇了 ScyllaDB (AP)？(這是經典的 Trade-off)
+    back: |
+      * **Facebook (CP)**：為了追求 **「強一致性」**，避免「已刪除的訊息又跑出來」的問題，且能複用自家的 HDFS 建設。
+      * **Discord (AP)**：優先追求 **「線性擴展」** 與 **「無單點故障」** 以支撐大規模即時串流，並透過 **Snowflake ID** 在應用層解決順序問題。
+
+  - front: |
+      Chat 系統中，"User Inbox" 模式與 "Group Channel" 模式有何區別？通常如何搭配使用？
+    back: |
+      * **User Inbox (寫擴散)**：每個用戶有個專屬信箱。發送者將訊息寫入每個接收者的 Inbox。優點是讀取極快，適合**單聊與小群**。
+      * **Group Channel (讀擴散)**：訊息只寫入一個群組信箱。所有成員去讀取同一個信箱。適合**萬人大群**，避免發送端爆炸。
+      * **混合策略**：小群用 Inbox，大群用 Group Channel。
+
+  - front: |
+      什麼是「重連風暴 (Thundering Herd Problem)」？
+      Client 端與 Server 端應如何防禦？
+    back: |
+      **定義**：當服務重啟或網路恢復時，數百萬 Client 同時發起連線，導致 Server 瞬間崩潰。
+      **防禦機制**：
+      * **Client**: **Backoff (指數退避)** + **Jitter (隨機抖動)**。讓 5 萬個用戶錯開重連時間。
+      * **Server**: **Graceful Shutdown** (優雅關閉)，並配合限流。
+
+  - front: |
+      在「已讀狀態」更新中，為什麼使用 Write-Back (寫入合併) 機制？
+    back: |
+      若用戶快速滑動聊天室，會產生數百次「已讀」請求。直接寫 DB 會導致 IO 爆炸。
+      **Write-Back**：先寫入 **Redis Buffer**，僅記錄最後一個已讀 ID (Watermark)，然後定期 (如每幾秒) 批量寫入一次 DB。犧牲微小的即時性 (最終一致性) 換取巨大的效能提升。
+
+  - front: |
+      為什麼 Chat 系統的 Hot Path 路由推薦使用 Redis Pub/Sub 而不是 Kafka？
+      (請說明 Topic Explosion 問題，這是系統設計的殺手級問題)
+    back: |
+      **核心原因：Kafka 不支援 Topic Explosion (Topic 爆炸)。**
+      * **Chat 需求**：每個聊天室/用戶需要獨立 Channel，可能有 **數千萬個** Channel。
+      * **Kafka 限制**：Topic 對應磁碟分區與 Zookeeper Metadata。建立數萬個 Topic 就會導致 Cluster 崩潰 (OS File Handles 耗盡、Random I/O 變慢)。
+      * **Redis 優勢**：Channel 只是字串，無 Metadata 開銷，支援數億個動態 Channel，且延遲為微秒級。
+
+  - front: |
+      在 Chat 系統架構中，Redis、Redis Streams 和 Kafka 各自的最佳職責是什麼？
+    back: |
+      * **Redis Pub/Sub**: **Router (路由)**。處理即時、海量的 WebSocket 訊息轉發 (Hot Path)。
+      * **Redis Streams**: **Buffer (緩衝)**。處理短期的斷線重連補償。
+      * **Kafka**: **Pipeline (管線)**。處理非同步任務 (Cold Path)，如寫入 DB、搜尋索引 (ES)、數據分析。
+
+  - front: |
+      對於「訊息 ID 生成」，為什麼選擇 Snowflake ID 而非 DB 自增 ID (Auto Increment)？
+    back: |
+      * **全域唯一**：分佈式系統中多台 Server 可同時生成，不需協調。
+      * **按時間排序 (K-Sortable)**：ID 本身包含時間戳，這對 **Cassandra/ScyllaDB** 的寫入效能非常友善 (減少磁碟碎片)。
+      * **DB 自增 ID 缺點**：無法在分佈式 DB 中保證全域唯一且單調遞增，且依賴單點 DB 效能。

@@ -1,0 +1,39 @@
+# 主題：MongoDB vs Cassandra vs DynamoDB 架構深度解析
+# 來源：系統設計筆記 (LSM-Tree vs B-Tree)
+
+cards:
+  # --- 1. 核心底層結構 (The Engine) ---
+  - front: "MongoDB 與 Cassandra 在底層儲存引擎上的核心結構差異為何？"
+    back: "MongoDB：使用 **B-Tree (B+ Tree)**，強調讀取效能與結構平衡。\nCassandra：使用 **LSM-Tree (Log-Structured Merge-tree)**，強調寫入吞吐量。"
+
+  - front: "為什麼 Cassandra 的寫入速度（Write Throughput）遠勝 MongoDB？"
+    back: "因為 Cassandra 是 **Append-Only（順序寫入）**。它不檢查舊資料，直接寫入 Memtable（類似日誌追加），硬碟磁頭不需回頭。\n相反，MongoDB 需 **In-Place Update**，寫入時需維護 B-Tree 平衡，涉及隨機 I/O。"
+
+  - front: "為什麼 MongoDB 的讀取延遲（Read Latency）通常低於 Cassandra？"
+    back: |
+      因為 MongoDB (B-Tree) 支援 **Direct Access**，透過指標 $O(\log N)$ 直接跳轉。
+      Cassandra (LSM-Tree) 讀取時需 **Merge & Compact**，必須檢查 Memtable 與多個 SSTable 檔案（Read Amplification），較為費時。
+
+  - front: "用一個生活化的比喻來描述 Cassandra (LSM-Tree) 與 MongoDB (B-Tree) 的寫入行為？"
+    back: "Cassandra (LSM-Tree) 像 **「忙碌的收發室」**：信件來了先丟進箱子再說（寫入快，讀取時要翻箱倒櫃）。\nMongoDB (B-Tree) 像 **「強迫症的檔案室」**：信件來了要按規矩分類歸檔（寫入慢，讀取時一抓就有）。"
+
+  # --- 2. 資料模型與查詢 (Data & Query) ---
+  - front: "在處理「巢狀資料 (Nested Data)」時，MongoDB 與 Cassandra 有何決定性差異？"
+    back: "MongoDB：**BSON 是可遍歷的**，支援 Projection（只讀取 user.address.city）。\nCassandra：**視為 Frozen Blob**，必須讀出整個 Object 並反序列化，浪費 IO/CPU，且不支援針對巢狀內部欄位的索引。"
+
+  - front: "為什麼不建議在 Cassandra 中使用 Secondary Index？"
+    back: "Cassandra 的 Secondary Index 實作上是 **Hidden Table**。查詢時會觸發 **Scatter-Gather**（分散-收集），若未指定 Partition Key，需掃描全叢集節點，效能極差。"
+
+  # --- 3. 分散式架構 (Distributed System) ---
+  - front: "在 CAP 理論與拓撲結構中，MongoDB 與 Cassandra 的定位分別為何？"
+    back: "MongoDB：**Master-Slave (CP)**，預設強一致性，寫入需經過 Primary。\nCassandra：**Masterless / Peer-to-Peer (AP)**，高可用性，所有節點皆可寫入，依靠 Gossip 協議與 Hinted Handoff。"
+
+  - front: "DynamoDB 與 Cassandra 同樣是大規模 NoSQL，為何 DynamoDB 的寫入速度在物理極限上輸給 Cassandra？"
+    back: "因為 **DynamoDB 底層仍是 B-Tree**（為了穩定讀取），在寫入機制上必然輸給 **Cassandra 的 LSM-Tree（Append-Only）**。"
+
+  # --- 4. 選型決策 (Decision Matrix) ---
+  - front: "架構師決策：什麼場景首選 MongoDB？什麼場景首選 Cassandra？"
+    back: "MongoDB：**靈活多變、巢狀資料、複雜查詢**（如：使用者 Profile、CMS、電商商品）。\nCassandra：**寫多讀少、資料量巨大、結構簡單**（如：IoT Log、傳訊軟體歷史訊息、軌跡紀錄）。"
+
+  - front: "架構師決策：DynamoDB 最大的優勢與劣勢為何？"
+    back: "優勢：**穩 + Serverless**（全託管，自動處理分片與擴展，維運成本最低）。\n劣勢：**HTTP Overhead**（連線比 Mongo 的 TCP 慢）且**缺乏複雜查詢能力**（只能依賴 Key 存取）。"

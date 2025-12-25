@@ -1,0 +1,30 @@
+# 主題：MongoDB 分片模式與策略 (Sharding Patterns & Strategy)
+# 來源：MongoDB Sharding Note
+
+cards:
+  # --- 1. Hashed Sharding (雜湊分片) ---
+  - front: "什麼是 MongoDB 的 Hashed Sharding？它主要解決什麼問題？"
+    back: "它不直接使用原始 Key，而是計算 Key 的 **MD5 雜湊值** 來分配 Chunk。\n主要解決：**單調遞增 Key（如 Timestamp/Auto-inc ID）導致的寫入熱點（Hot Spot）問題**，確保寫入能均勻分佈到所有機器。"
+
+  - front: "Hashed Sharding 在「寫入效能」與「讀取效能」上的 Trade-off（取捨）是什麼？"
+    back: "**寫入 (Pros)**：極佳。數據隨機打散，避免單點過載，可線性擴展。\n**讀取 (Cons)**：範圍查詢（Range Query）效能差。因為連續數據被打散到不同機器，DB 必須執行 **Scatter-Gather**（廣播詢問所有 Shard），導致高延遲。"
+
+  # --- 2. 架構對比：MongoDB vs Consistent Hashing ---
+  - front: "[System Design] MongoDB 的分片架構與 Consistent Hashing (如 Cassandra/Dynamo) 在「管理方式」上有何本質不同？"
+    back: "**MongoDB (Chunk-based)**：**中心化 (Centralized)**。依賴 **Config Servers** 儲存 Metadata（對照表）來知道數據在哪。\n**Consistent Hashing (Ring-based)**：**去中心化 (Decentralized)**。使用 Hash Ring 演算法，節點間互通有無，無需中央管理者。"
+
+  - front: "當叢集擴容（新增節點）時，MongoDB 與 Consistent Hashing 在「數據搬遷」上有何差異？"
+    back: "**MongoDB**：Balancer 介入，物理搬運 Chunk，操作較**繁重 (Heavy)**。\n**Consistent Hashing**：只需從環上的鄰居分攤數據，僅需移動 **1/N** 的資料，網路影響最小化。"
+
+  - front: "從 CAP 理論來看，MongoDB Sharding 與 Cassandra/Dynamo 分別傾向於什麼？"
+    back: "**MongoDB**：傾向 **CP (Consistency)**，強調強一致性與精確的數據位置控制。\n**Cassandra/Dynamo**：傾向 **AP (Availability)**，容忍最終一致性以換取極致的高可用與寫入不中斷。"
+
+  # --- 3. Shard Key 策略 (Sharding Strategy) ---
+  - front: "選擇 Shard Key 時，為什麼「基數 (Cardinality)」必須足夠高？請舉一個反例。"
+    back: "因為基數決定了**最大可分片數量**。\n反例：`region` (如 US, EU)。若只有 3 個值，整個叢集最多只能拆成 3 個 Chunk/Shard，無論加多少機器都無法擴展。"
+
+  - front: "什麼是 MongoDB 查詢中的 Scatter-Gather（分散-收集）？為什麼要盡量避免？"
+    back: "當查詢條件**不包含** Shard Key 時，`mongos` 必須將請求廣播給**所有** Shard，並等待所有回應後再合併。\n這會導致隨著 Shard 數量增加，查詢延遲成比例增加（效能殺手）。應追求 **Targeted Queries**（直接路由到特定 Shard）。"
+
+  - front: "評估 Shard Key 的三大黃金原則口訣是什麼？"
+    back: "1. **Cardinality (基數)** 決定擴展上限。\n2. **Frequency (寫入頻率)** 決定寫入瓶頸 (避免熱點)。\n3. **Query Pattern (查詢模式)** 決定讀取延遲 (避免 Scatter-Gather)。"

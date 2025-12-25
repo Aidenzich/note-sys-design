@@ -1,0 +1,55 @@
+# 主題：NoSQL 核心架構與原理 (Redis, Cassandra, LSM vs B+ Tree)
+# 來源：NoSQL 核心架構與原理筆記
+
+cards:
+  # --- SQL vs NoSQL ---
+  - front: "在擴展方式（Scaling）上，SQL 與 NoSQL 的主要區別是什麼？"
+    back: "SQL (RDBMS) 主要依賴 **垂直擴展 (Scale Up)**，即升級單機硬體；NoSQL 主要依賴 **水平擴展 (Scale Out)**，即增加機器節點。"
+
+  - front: "SQL 與 NoSQL 在資料一致性模型上的主要對比是？"
+    back: "SQL 通常遵循 **ACID (強一致性)**；NoSQL 為了可用性通常遵循 **BASE** 模型或 **CAP 定理**的權衡（最終一致性）。"
+
+  # --- Redis 架構 ---
+  - front: "Redis Sentinel (哨兵模式) 與 Redis Cluster (叢集模式) 的核心功能差異為何？"
+    back: "Sentinel 專注於 **高可用性 (HA)**，負責故障轉移，但無法水平擴展寫入；Cluster 專注於 **分片 (Sharding)** 加上高可用性，可水平擴展儲存與寫入。"
+
+  - front: "AWS MemoryDB for Redis 與 ElastiCache 的關鍵區別是什麼？"
+    back: "MemoryDB 提供 **強持久性 (Durability)**，底層使用分散式交易日誌，保證資料不遺失；ElastiCache 則主要作為快取，持久性較弱。"
+
+  # --- Sharding ---
+  - front: "Hash Sharding (雜湊分片) 的主要缺點是什麼？"
+    back: "1. 不支援 **範圍查詢 (Range Query)**。\n2. 擴充節點時若無一致性雜湊，需大規模搬移資料。"
+
+  - front: "Range Sharding (範圍分片) 最容易遇到的效能問題是什麼？"
+    back: "**Hotspot (熱點) 問題**。例如以時間戳記為 Key，寫入流量會集中在負責最新時間範圍的那一個節點上。"
+
+  # --- 儲存引擎 (Storage Engines) ---
+  - front: "B+ Tree 與 LSM Tree 在讀寫效能上的核心權衡 (Trade-off) 是什麼？"
+    back: "**B+ Tree** (如 MySQL) 是 **Read Optimized**，適合讀多寫少；**LSM Tree** (如 Cassandra) 是 **Write Optimized**，適合高併發寫入。"
+
+  - front: "簡述 LSM Tree (Log-Structured Merge Tree) 的資料寫入流程。"
+    back: "1. 寫入 **WAL** (防止遺失)。\n2. 寫入記憶體的 **MemTable** (有序)。\n3. MemTable 滿了 Flush 到磁碟變成 **Immutable SSTable**。\n4. 背景執行 **Compaction** 合併檔案。"
+
+  - front: "在 LSM Tree 架構中，Bloom Filter 的作用是什麼？"
+    back: "用於快速判斷一個 Key **「絕對不存在」** 或 「可能存在」於 SSTable 中，從而減少無效的磁碟 I/O 讀取，優化讀取效能。"
+
+  - front: "LSM Tree 的 Compaction 機制會帶來什麼副作用？"
+    back: "**寫入放大 (Write Amplification)**。因為在合併 SSTable 的過程中，同一份資料會被多次重寫。"
+
+  # --- Cassandra & Wide Column ---
+  - front: "在 Cassandra 中，Partition Key 與 Clustering Key 的用途分別為何？"
+    back: "**Partition Key** 決定資料分佈在哪個 **節點 (Node)**；**Clustering Key** 決定資料在該分區內的 **排序方式**。"
+
+  - front: "為什麼 Cassandra 的 Secondary Index 查詢若不帶 Partition Key 會效能極差？"
+    back: "因為會觸發 **Scatter-Gather** 模式，必須掃描叢集中所有的節點才能找到資料。"
+
+  # --- 一致性修復 ---
+  - front: "在分散式系統（如 Dynamo/Cassandra）中，Merkle Tree 的用途是什麼？"
+    back: "用於 **Anti-Entropy (反熵/資料修復)**。透過比對 Hash Tree 的 Root 和分支，能快速定位出不同副本間的差異數據，僅傳輸差異部分進行修復。"
+
+  # --- Cassandra vs MongoDB ---
+  - front: "從架構拓撲來看，MongoDB 與 Cassandra 的最大差異為何？"
+    back: "MongoDB 是 **Master-Slave (Replica Set)** 架構，寫入只能在 Primary；Cassandra 是 **Peer-to-Peer (Leaderless)** 架構，多點可寫，無單點故障。"
+
+  - front: "MongoDB 與 Cassandra 的底層儲存引擎分別是什麼？"
+    back: "MongoDB 使用 **WiredTiger (B+ Tree 變體)**；Cassandra 使用 **LSM Tree**。"
