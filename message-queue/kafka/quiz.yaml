@@ -1,0 +1,180 @@
+questions:
+  - questionNumber: 1
+    question: "根據文章，Kafka 的誕生主要是為了解決傳統點對點傳輸模式中，隨著系統擴張而產生的什麼問題？"
+    imageUrl: null
+    answerOptions:
+      - text: "資料庫儲存容量不足的問題"
+        rationale: "Kafka 雖涉及儲存，但其初衷並非取代資料庫儲存。"
+        isCorrect: false
+      - text: "應用程式與資料存儲系統之間 $N \\times N$ 的複雜度難題"
+        rationale: "文章指出，Kafka 將複雜度從 $O(N \\times M)$ 降到了 $O(N + M)$，解決了網狀結構帶來的維護困難。"
+        isCorrect: true
+      - text: "網路頻寬不足的問題"
+        rationale: "頻寬是考量之一，但核心痛點是架構上的連接複雜度。"
+        isCorrect: false
+      - text: "Java 虛擬機 (JVM) 的垃圾回收效能問題"
+        rationale: "這是實作層面的細節，非架構設計的原始動機。"
+        isCorrect: false
+    hint: "回想一下文章中提到的「解耦 (Decoupling)」概念以及連線數量的變化。"
+
+  - questionNumber: 2
+    question: "Kafka 的索引檔案 (.index) 採用了何種機制，使其能常駐於記憶體中以減少磁碟 I/O，但代價是無法直接定位到確切訊息？"
+    imageUrl: null
+    answerOptions:
+      - text: "B+ Tree 索引"
+        rationale: "這是關聯式資料庫常用的索引，會為每一行建立索引，並非 Kafka 的選擇。"
+        isCorrect: false
+      - text: "稀疏索引 (Sparse Index)"
+        rationale: "Kafka 每當寫入累積達到一定位元組數（如 4KB）才建立一個索引項，這種設計大幅減少了索引大小。"
+        isCorrect: true
+      - text: "雜湊索引 (Hash Index)"
+        rationale: "雜湊索引不支援範圍查詢，且 Kafka 並未使用此機制於日誌索引。"
+        isCorrect: false
+      - text: "點陣圖索引 (Bitmap Index)"
+        rationale: "通常用於資料倉儲的基數較低欄位，不適用於 Kafka 的 Offset 查找。"
+        isCorrect: false
+    hint: "這種索引方式不會為「每一條」訊息都建立索引，而是有一定的間隔。"
+
+  - questionNumber: 3
+    question: "Kafka 利用 Zero-Copy 技術大幅提升傳輸效率，但在下列哪種情況下，Zero-Copy 機制會失效？"
+    imageUrl: null
+    answerOptions:
+      - text: "啟用 SSL/TLS 加密"
+        rationale: "因為加密運算必須在 CPU 上進行，資料必須從核心空間複製到使用者空間處理，打破了 Zero-Copy 的路徑。"
+        isCorrect: true
+      - text: "使用 SSD 固態硬碟"
+        rationale: "硬碟類型不影響 Zero-Copy 機制的運作。"
+        isCorrect: false
+      - text: "單個 Partition 大小超過 1GB"
+        rationale: "檔案大小與是否能使用 sendfile() 系統呼叫無直接關係。"
+        isCorrect: false
+      - text: "消費者數量超過 100 個"
+        rationale: "消費者數量增加會增加負載，但不會導致 Zero-Copy 機制本身的失效。"
+        isCorrect: false
+    hint: "Zero-Copy 的前提是資料不需要進入「使用者空間 (User Space)」進行處理，想一想什麼操作必須在 CPU 運算？"
+
+  - questionNumber: 4
+    question: "在 KRaft 架構 (移除 ZooKeeper) 中，叢集的元資料 (Metadata) 是如何儲存與傳播的？"
+    imageUrl: null
+    answerOptions:
+      - text: "儲存在每個 Broker 的記憶體雜湊表中"
+        rationale: "記憶體無法保證持久性，KRaft 仍需持久化儲存。"
+        isCorrect: false
+      - text: "作為事件記錄寫入內部的 `__cluster_metadata` 主題"
+        rationale: "KRaft 將元資料變更視為事件日誌 (Event Log)，通過 Raft 協議在 Controller 間同步。"
+        isCorrect: true
+      - text: "儲存在外部的關聯式資料庫 (如 MySQL)"
+        rationale: "KRaft 旨在移除外部依賴，實現自我管理。"
+        isCorrect: false
+      - text: "透過廣播 RPC 直接發送給所有客戶端"
+        rationale: "這是舊版 Controller 的部分行為，並非 KRaft 的儲存核心。"
+        isCorrect: false
+    hint: "KRaft 的核心理念是 Kafka 的「自我管理」，它使用了一個內部的 Topic 來記錄變更。"
+
+  - questionNumber: 5
+    question: "關於 Kafka 的水位線 (High Watermark, HWM) 與 Log End Offset (LEO)，下列敘述何者正確？"
+    imageUrl: null
+    answerOptions:
+      - text: "消費者可以讀取到 LEO 之前的最新資料"
+        rationale: "消費者只能讀取到 HWM 之前的資料，因為 LEO 與 HWM 之間的資料尚未在 ISR 中完全同步。"
+        isCorrect: false
+      - text: "HWM 是 ISR 集合中所有副本 LEO 的最小值"
+        rationale: "HWM 標示了所有同步副本都已確認寫入的位置，因此取決於最慢的那個同步副本（最小值）。"
+        isCorrect: true
+      - text: "LEO 永遠小於或等於 HWM"
+        rationale: "相反，LEO (Log End Offset) 通常大於或等於 HWM，因為 Leader 寫入總是快於同步確認。"
+        isCorrect: false
+      - text: "HWM 主要用於觸發日誌壓縮 (Compaction)"
+        rationale: "HWM 主要用於資料一致性與消費者可見性，與 Log Compaction 的觸發機制無關。"
+        isCorrect: false
+    hint: "HWM 決定了消費者「能看到」哪些資料，它必須保證這些資料在 ISR 中是安全的。"
+
+  - questionNumber: 6
+    question: "Kafka 引入「Leader Epoch」機制主要是為了解決什麼問題？"
+    imageUrl: null
+    answerOptions:
+      - text: "解決 Page Cache 寫入磁碟過慢的問題"
+        rationale: "這是 I/O 子系統的問題，與 Epoch 無關。"
+        isCorrect: false
+      - text: "解決舊 Leader 復活後導致的資料截斷錯誤與不一致 (僵屍 Leader)"
+        rationale: "Leader Epoch 提供了單調遞增的版本號，確保副本在截斷日誌時有權威的參考，防止資料丟失或衝突。"
+        isCorrect: true
+      - text: "解決 ZooKeeper 的寫入瓶頸"
+        rationale: "這是 KRaft 解決的問題。"
+        isCorrect: false
+      - text: "解決網路頻寬被 SSL 加密佔用的問題"
+        rationale: "這與複製協議的一致性邏輯無關。"
+        isCorrect: false
+    hint: "當一個 Leader 掛掉又恢復時，如果只依賴 HWM，它可能會錯誤地截斷自己的日誌或將未提交的資料暴露給消費者。"
+
+  - questionNumber: 7
+    question: "在 Kafka 的日誌清理策略中，`Compact Policy` (日誌壓縮) 的核心保留邏輯是什麼？"
+    imageUrl: null
+    answerOptions:
+      - text: "保留最近 7 天內的資料"
+        rationale: "這是基於時間的 Delete Policy。"
+        isCorrect: false
+      - text: "對於任意一個 Key，至少保留其最新的一個 Value"
+        rationale: "Log Compaction 適用於 Key-Value 資料，確保系統能恢復到每個 Key 的最新狀態。"
+        isCorrect: true
+      - text: "當日誌大小超過 1GB 時刪除舊資料"
+        rationale: "這是基於大小的 Delete Policy。"
+        isCorrect: false
+      - text: "刪除所有 Value 為 null 的訊息"
+        rationale: "Value 為 null 是刪除標記 (Tombstone)，Compact 最終會刪除它，但這不是保留邏輯的核心。"
+        isCorrect: false
+    hint: "這種策略常用於資料庫變更日誌 (CDC) 場景，我們只關心每個 ID (Key) 最後變成了什麼。"
+
+  - questionNumber: 8
+    question: "在 Kafka 的事務 (Transactional Messaging) 機制中，Coordinator 如何標記一個事務的提交或中止？"
+    imageUrl: null
+    answerOptions:
+      - text: "回頭修改已寫入訊息的狀態位元"
+        rationale: "Kafka 的日誌是不可變的 (Immutable)，無法修改已寫入的內容。"
+        isCorrect: false
+      - text: "向 Partition 寫入特殊的 Control Marker (Commit/Abort)"
+        rationale: "這些 Marker 對普通消費者不可見，但能通知事務感知型消費者該事務是否有效。"
+        isCorrect: true
+      - text: "在 ZooKeeper 中刪除對應的 Transaction ID"
+        rationale: "這不足以保證資料層面的原子性與隔離性。"
+        isCorrect: false
+      - text: "發送一條 Key 為 'TransactionEnd' 的普通訊息"
+        rationale: "這會混淆業務資料，Kafka 使用的是特殊的控制訊息類型。"
+        isCorrect: false
+    hint: "由於日誌是 Append-Only 的，Kafka 不能去「修改」舊訊息，只能「追加」新的指示訊息。"
+
+  - questionNumber: 9
+    question: "關於消費者群組的再平衡 (Rebalancing)，「Cooperative Rebalancing」與傳統的「Eager Rebalancing」相比，最大的改進是什麼？"
+    imageUrl: null
+    answerOptions:
+      - text: "強制所有消費者暫停，直到重新分配完成"
+        rationale: "這是 Eager (Stop-the-World) 模式的特徵。"
+        isCorrect: false
+      - text: "只暫停和釋放需要移動的分區，消除了全局停頓 (Stop-the-World)"
+        rationale: "Cooperative 模式允許消費者繼續處理不需要移動的分區，實現了漸進式的再平衡。"
+        isCorrect: true
+      - text: "將分區分配工作交給 ZooKeeper 處理"
+        rationale: "分配邏輯主要由 Consumer Leader 計算，與 ZK 無直接關係。"
+        isCorrect: false
+      - text: "優先分配給網路延遲最低的消費者"
+        rationale: "這取決於分配策略 (如 Rack Awareness)，而非 Rebalance 協議本身的改進。"
+        isCorrect: false
+    hint: "傳統模式是一刀切 (全部停止)，新模式則是更溫和的「增量」調整。"
+
+  - questionNumber: 10
+    question: "文章最後區分了 Kafka Broker 的 High Watermark (HWM) 與流處理中的 Watermark，下列區別何者正確？"
+    imageUrl: null
+    answerOptions:
+      - text: "HWM 處理亂序事件；流處理 Watermark 保證資料持久性"
+        rationale: "定義反了。HWM 是儲存層概念，流處理 Watermark 才是處理亂序 (Event Time) 的。"
+        isCorrect: false
+      - text: "HWM 代表資料持久性 (Consistency)；流處理 Watermark 代表事件時間進度 (Event Time)"
+        rationale: "HWM 確保消費者讀到的資料不丟失；流處理 Watermark 用於推斷何時觸發時間視窗計算。"
+        isCorrect: true
+      - text: "兩者本質上是同一個值，只是名稱不同"
+        rationale: "它們屬於完全不同的層次 (儲存層 vs. 計算層) 和語義。"
+        isCorrect: false
+      - text: "HWM 由生產者產生；流處理 Watermark 由 Broker 產生"
+        rationale: "HWM 由 Broker 複製機制產生；流處理 Watermark 通常由源頭或處理邏輯推斷。"
+        isCorrect: false
+    hint: "一個是關於「資料存好了沒 (Storage)」，另一個是關於「現在幾點了 (Time/Logic)」。"
