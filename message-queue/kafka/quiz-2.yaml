@@ -39,16 +39,16 @@ questions:
     question: "Kafka 針對 .index 與 .timeindex 檔案使用了 mmap (Memory Mapped Files) 技術，但為何針對主數據檔案 .log 卻**不使用** mmap？"
     imageUrl: null
     answerOptions:
-      - text: "因為 Java 的 MappedByteBuffer 不支援大於 2GB 的檔案"
+      - text: "因為 Java 的 MappedByteBuffer 無法有效處理大於 2GB 的大型日誌檔案"
         rationale: "雖然這是 Java 的限制，但並非 Kafka 架構決策的主因，可以透過切分檔案解決。"
         isCorrect: false
-      - text: "因為 mmap 在發生 Page Fault 時會阻塞 I/O 執行緒，且難以精確控制髒頁 (Dirty Page) 的刷盤時機"
+      - text: "因為 mmap 在發生 Page Fault 時會阻塞 I/O 執行緒，且難以精確控制髒頁刷盤時機"
         rationale: "日誌檔案很大且寫入頻繁，隨機的 Page Fault 會嚴重影響效能，且 Kafka 依賴應用層複製來保證安全性，而非 OS 刷盤。"
         isCorrect: true
-      - text: "因為 mmap 無法支援 Zero-Copy 技術"
+      - text: "因為 mmap 與 Zero-Copy (sendfile) 技術衝突，兩者在 Kernel 層面不相容"
         rationale: "mmap 與 Zero-Copy (sendfile) 是可以並存的技術，甚至 mmap 本身就是一種 Zero-Copy 的讀取方式。"
         isCorrect: false
-      - text: "因為 mmap 只能用於唯讀檔案，無法用於追加寫入"
+      - text: "因為 mmap 僅適用於唯讀檔案，不支援 Kafka 日誌所需的高頻追加寫入"
         rationale: "mmap 支援讀寫模式 (MAP_SHARED)，並非僅限唯讀。"
         isCorrect: false
     hint: "思考一下 mmap 的 I/O 行為是由誰控制的 (OS 還是 Application)，以及這對高併發寫入可能帶來的不可預測性。"
@@ -57,16 +57,16 @@ questions:
     question: "在冪等性生產者 (Idempotent Producer) 的實作中，Broker 如何判斷一條訊息是否為重複發送？"
     imageUrl: null
     answerOptions:
-      - text: "比較訊息的 MD5 雜湊值與最近 5 條訊息的雜湊值"
+      - text: "比對訊息的 MD5 雜湊值與 Broker 端最近 5 條訊息的內容雜湊值"
         rationale: "計算雜湊值太耗費 CPU 資源，且無法處理亂序問題。"
         isCorrect: false
       - text: "檢查 `<PID, Partition>` 的 Sequence Number，若新訊息 $N \\le N_{last}$ 則視為重複"
         rationale: "Broker 維護每個生產者在該分區的最新序列號。小於等於目前序列號的訊息意味著已經處理過。"
         isCorrect: true
-      - text: "檢查訊息的 Timestamp 是否早於最後一條訊息的 Timestamp"
+      - text: "檢查訊息的 Timestamp 是否早於該 Partition 最後一條訊息的 Timestamp"
         rationale: "時間戳可能因為時鐘偏差而不準確，不能作為去重的嚴格依據。"
         isCorrect: false
-      - text: "查詢 ZooKeeper 中是否已存在該 Message ID"
+      - text: "在 ZooKeeper 中為每條訊息建立臨時節點，並檢查 Message ID 是否已存在"
         rationale: "ZooKeeper 不適合用於高頻寬的數據路徑檢查，且 Kafka 旨在減少對 ZK 的依賴。"
         isCorrect: false
     hint: "這類似於 TCP 協定中的滑動視窗與序列號機制，用於保證順序與去重。"
@@ -93,16 +93,16 @@ questions:
     question: "關於 Log Compaction 機制中的 `SkimpyOffsetMap`，下列敘述何者正確？"
     imageUrl: null
     answerOptions:
-      - text: "它儲存在磁碟上，用於記錄所有被刪除訊息的 Offset"
+      - text: "它是一個儲存在磁碟上的映射表，用於記錄所有被標記為刪除訊息的 Offset"
         rationale: "它主要在記憶體中建立，用於在清理過程中快速比對 Key。"
         isCorrect: false
       - text: "它是一個 Key 到 Offset 的雜湊映射，用於識別哪些 Key 擁有更新的 Value"
-        rationale: "Cleaner Thread 讀取日誌建立此 Map，若後續掃描到的 Key 在 Map 中有更大的 Offset，則舊記錄可被刪除。"
+        rationale: "Cleaner Thread 讀取日誌建立此 Map，若後續掃描到的 Key 在 Map 中有更大的 Offset，則舊記錄可 be 刪除。"
         isCorrect: true
-      - text: "它用於儲存事務 (Transaction) 的狀態標記"
+      - text: "它是一個特殊的事務日誌結構，用於儲存 Transaction 在 Compaction 期間的狀態"
         rationale: "事務狀態儲存在 `__transaction_state` 主題中。"
         isCorrect: false
-      - text: "它用於加速消費者對於稀疏索引的查詢速度"
+      - text: "它是一個二級索引結構，用於加速消費者對於過期訊息在磁碟上的定位速度"
         rationale: "稀疏索引使用的是二分搜尋，與 Compaction 的 Map 無關。"
         isCorrect: false
     hint: "Compaction 的目的是保留每個 Key 的最新值。系統需要一個高效的資料結構來知道「哪個 Key 的最新 Offset 是多少」。"
@@ -111,16 +111,16 @@ questions:
     question: "為何 Kafka 官方強烈建議**不要**設定 `flush.messages` 或 `flush.ms` 來強制執行 fsync？"
     imageUrl: null
     answerOptions:
-      - text: "因為這會導致 ZooKeeper 連線超時"
+      - text: "因為這會導致 ZooKeeper 連線頻繁超時，進而引發叢集 Broker 的不穩定震盪"
         rationale: "刷盤操作與 ZK 連線無直接關聯。"
         isCorrect: false
-      - text: "因為這會破壞 Zero-Copy 機制"
+      - text: "因為這會破壞作業系統層級的 Zero-Copy 機制，導致核心態與用戶態的切換增加"
         rationale: "fsync 影響的是磁碟寫入，與讀取時的 Zero-Copy 無關。"
         isCorrect: false
       - text: "因為這會導致隨機 I/O 飆升並嚴重降低吞吐量，且 Kafka 已透過複製機制保障持久性"
         rationale: "頻繁的 fsync 會破壞 OS 的 Page Cache 批次寫入優化，將順序寫入退化為頻繁的磁碟操作。"
         isCorrect: true
-      - text: "因為這會導致重複消費問題"
+      - text: "因為強制刷盤會導致消費者在拉取數據時遇到嚴重的重複消費與 Offset 提交衝突"
         rationale: "刷盤策略與消費者的 Offset 提交邏輯無關。"
         isCorrect: false
     hint: "Kafka 的設計哲學是：依賴「多副本複製」來防止單點資料丟失，而不是依賴單機的「同步刷盤」。"
@@ -147,16 +147,16 @@ questions:
     question: "在 KRaft 架構下，普通的 Broker 節點如何獲取最新的叢集元資料？"
     imageUrl: null
     answerOptions:
-      - text: "通過訂閱 ZooKeeper 的 Watch 事件"
+      - text: "通過訂閱 ZooKeeper 的 Watch 事件，在元資料變更時接收非同步的回調通知"
         rationale: "KRaft 已經移除了 ZooKeeper。"
         isCorrect: false
       - text: "作為 `__cluster_metadata` 主題的 Observer，主動向 Controller 拉取 (Fetch) 記錄"
         rationale: "這是一種事件驅動 (Event-Driven) 模式，Broker 像消費者一樣重放元資料日誌來更新本地狀態。"
         isCorrect: true
-      - text: "等待 Controller 定期發送 RPC 推送完整快照"
+      - text: "等待 Active Controller 定期發起 RPC 呼叫，向所有 Broker 推送完整的元資料快照"
         rationale: "這是舊版 Controller 的模式，KRaft 改為拉取模式。"
         isCorrect: false
-      - text: "直接讀取 Controller 節點的磁碟檔案"
+      - text: "在啟動時直接讀取 Active Controller 節點共享的磁碟檔案以獲取初始叢集配置"
         rationale: "分散式系統中節點間無法直接讀取對方磁碟。"
         isCorrect: false
     hint: "在 KRaft 中，元資料就是一個普通的 Kafka Topic。Broker 對待它就像對待其他 Topic 一樣，只是用途不同。"
@@ -165,16 +165,16 @@ questions:
     question: "當一個 Follower 重新加入 ISR 時，它會發送 `OffsetsForLeaderEpoch` 請求給 Leader。Leader 會返回什麼資訊？"
     imageUrl: null
     answerOptions:
-      - text: "該 Follower 缺失的所有訊息內容"
+      - text: "該 Follower 在斷網期間所缺失的所有累計訊息內容以及對應的索引數據"
         rationale: "這是 FetchRequest 做的事，不是 OffsetsForLeaderEpoch 的目的。"
         isCorrect: false
       - text: "該 Leader Epoch 的 End Offset (該任期寫入的最後一條訊息的位移)"
         rationale: "Follower 根據這個權威的 End Offset 來截斷自己多餘的日誌，確保與 Leader 歷史一致。"
         isCorrect: true
-      - text: "當前的 High Watermark (HWM)"
+      - text: "當前的 High Watermark (HWM) 位移，用於確保 Follower 不會消費到未提交數據"
         rationale: "HWM 只能保證已提交的位移，無法解決 Epoch 變更時的日誌分岔問題。"
         isCorrect: false
-      - text: "最新的 Producer ID (PID) 列表"
+      - text: "最新的 Producer ID (PID) 列表與對應的序列號，用於初始化冪等性去重狀態"
         rationale: "這與日誌複製的一致性截斷無關。"
         isCorrect: false
     hint: "這個請求的目的是為了「對齊」日誌的歷史版本。Follower 需要知道：「在你當 Leader 的那個時期，你到底寫到了哪裡？」"
@@ -183,16 +183,16 @@ questions:
     question: "在消費者群組的「後勤之舞 (Logistical Dance)」中，分區分配策略 (如 Range, RoundRobin) 的具體計算邏輯是在哪裡執行的？"
     imageUrl: null
     answerOptions:
-      - text: "在 Group Coordinator (Broker 端) 執行"
+      - text: "在 Group Coordinator (即 Broker 端實例) 內部自動執行"
         rationale: "Coordinator 負責協調，但不負責具體的分配計算，這樣可以減輕 Broker 負擔並允許客戶端自定義策略。"
         isCorrect: false
-      - text: "在 Group Leader (Consumer 端) 執行"
+      - text: "在 Group Leader (即 Consumer 端某個實例) 內部執行"
         rationale: "被選為 Group Leader 的消費者負責計算分配方案，然後傳給 Coordinator 轉發給其他成員。"
         isCorrect: true
-      - text: "在 ZooKeeper 中執行"
+      - text: "在 ZooKeeper 叢集端透過特殊的排程器組件進行全域計算"
         rationale: "ZooKeeper 僅用於儲存元資料 (舊版)，不具備計算能力。"
         isCorrect: false
-      - text: "由每個 Consumer 獨立計算並達成共識"
+      - text: "由群組內每個 Consumer 基於共享元資料獨立計算並達成共識"
         rationale: "這會導致腦裂或不一致，必須由單一節點 (Group Leader) 決定。"
         isCorrect: false
     hint: "Kafka 為了保持 Broker 的輕量化，將複雜的分配邏輯下放到了客戶端 (Client-side) 執行。"
@@ -219,17 +219,17 @@ questions:
     question: "在 Kafka 事務中，當消費者設定 `isolation.level=read_committed` 時，若遇到一個 `Abort Marker`，它會如何處理？"
     imageUrl: null
     answerOptions:
-      - text: "拋出異常並停止消費"
+      - text: "拋出 `TransactionAbortedException` 異常並立即停止該分區的消費過程"
         rationale: "Abort 是事務的一種正常結果，消費者應忽略該事務數據並繼續，而非崩潰。"
         isCorrect: false
-      - text: "將該事務的所有訊息寫入 Dead Letter Queue"
+      - text: "自動將該事務內含的所有訊息轉發至 Dead Letter Queue (DLQ) 以供後續分析"
         rationale: "Kafka 本身不自動處理 DLQ，且 Abort 的數據應被視為不存在。"
         isCorrect: false
       - text: "丟棄該 Marker 之前對應事務 ID 的所有緩衝訊息，不返回給應用層"
         rationale: "消費者會在記憶體中緩衝未提交訊息，一旦收到 Abort Marker，就將這些髒數據丟棄。"
         isCorrect: true
-      - text: "將訊息標記為 'Uncommitted' 但仍返回給應用層"
-        rationale: "這違反了 `read_committed` 的語義，應用層不應看到未提交或已中止的數據。"
+      - text: "將這些訊息標記為 'Uncommitted' 狀態，並將其返回給上層應用進行邏輯處理"
+        rationale: "這違反了 `read_committed` 的語義，應用層應不看到未提交或已中止的數據。"
         isCorrect: false
     hint: "Abort 意味著這些操作「從未發生過」。消費者必須假裝沒看見這些數據。"
 
@@ -237,17 +237,17 @@ questions:
     question: "Kafka 的日誌段檔案命名規則 (例如 `00000000000000001000.log`) 是基於什麼？"
     imageUrl: null
     answerOptions:
-      - text: "該 Segment 創建時的時間戳"
+      - text: "該 Segment 檔案被創建時的系統毫秒級時間戳 (Timestamp)"
         rationale: "時間戳用於 .timeindex，不用於檔案命名。"
         isCorrect: false
       - text: "該 Segment 中第一條訊息的絕對 Offset (Base Offset)"
         rationale: "這樣設計可以讓 Broker 透過檔案名快速判斷某個 Offset 是否在該檔案範圍內。"
         isCorrect: true
-      - text: "該 Segment 的全域唯一 ID (UUID)"
+      - text: "由 Broker 自動分配的全域唯一識別碼 (UUID) 以避免檔名衝突"
         rationale: "UUID 無法反映順序關係，不利於查找。"
         isCorrect: false
-      - text: "該 Partition 的總訊息數量"
-        rationale: "訊息數量隨時在變，不能作為靜態檔案名。"
+      - text: "該 Partition 在日誌滾動發生時所包含的總訊息數量或字節大小"
+        rationale: "訊息數量隨時在變，進不能作為靜態檔案名。"
         isCorrect: false
     hint: "如果我要找 Offset 1050，看到檔案 `1000.log` 和 `2000.log`，我就知道它一定在 `1000.log` 裡。"
 
@@ -255,16 +255,16 @@ questions:
     question: "ISR (In-Sync Replicas) 的判定標準由 `replica.lag.time.max.ms` 控制。如果一個 Follower 被踢出 ISR，通常是因為什麼？"
     imageUrl: null
     answerOptions:
-      - text: "Follower 的磁碟空間已滿"
+      - text: "Follower 所在的伺服器磁碟空間已達到預設的容量閾值而無法寫入新日誌"
         rationale: "這是硬體故障，雖然可能導致無法同步，但 ISR 判定是基於「時間滯後」。"
         isCorrect: false
-      - text: "Follower 落後的訊息數量超過了 `replica.lag.max.messages`"
+      - text: "Follower 落後 Leader 的訊息條數超過了 `replica.lag.max.messages` 的限制"
         rationale: "這個基於數量的參數在舊版 Kafka 已被移除，因為在流量突波時很難設定。"
         isCorrect: false
       - text: "Follower 在指定時間內沒有向 Leader 發送 Fetch 請求，或請求了但未追上 LEO"
         rationale: "這意味著 Follower 的處理速度持續低於 Leader 的寫入速度，成為了慢節點。"
         isCorrect: true
-      - text: "Follower 與 ZooKeeper 斷開連線"
+      - text: "Follower 與 ZooKeeper 叢集斷開連線超過了 Session Timeout 所設定的時長"
         rationale: "ISR 管理由 Controller/Leader 負責，Follower 與 ZK 的連線狀態非直接判定標準。"
         isCorrect: false
     hint: "現代 Kafka 不再關心你落後了「多少條」訊息，而是關心你落後了「多久」。"
@@ -276,13 +276,13 @@ questions:
       - text: "為了讓消費者有時間讀取到該刪除事件，從而同步刪除自己下游的狀態"
         rationale: "如果直接刪除，離線的消費者重新上線後就永遠不知道這條資料被刪掉了，導致資料不一致 (Zombie Data)。"
         isCorrect: true
-      - text: "為了等待硬碟空間釋放"
+      - text: "為了等待底層作業系統完成磁碟空間的回收操作，避免過早釋放檔案描述符"
         rationale: "保留 Tombstone 反而佔用空間，這不是目的。"
         isCorrect: false
-      - text: "為了保證 Transaction 的原子性"
+      - text: "為了保證跨分區交易 (Transaction) 的原子性，防止在清理期間導致數據遺失"
         rationale: "Tombstone 機制主要針對 Key-Value 的 Compaction，與事務機制不同。"
         isCorrect: false
-      - text: "為了讓 Controller 能夠恢復元資料"
+      - text: "為了讓 KRaft Controller 能夠在故障恢復時，根據 Tombstone 重新構建元資料"
         rationale: "Controller 元資料有自己的機制，與使用者數據的 Tombstone 無關。"
         isCorrect: false
     hint: "如果我默默地刪掉了一行資料，這段時間剛好沒上線的消費者怎麼知道這件事發生過？"
@@ -294,13 +294,13 @@ questions:
       - text: "Co-location：保證同一 Key 的資料在不同 Topic 中被同一個消費者處理"
         rationale: "例如 Topic A 的 Partition 0 和 Topic B 的 Partition 0 都分給 Consumer X。這對於 Join 操作非常方便。"
         isCorrect: true
-      - text: "Zero-Copy：可以直接在消費者之間傳輸數據"
+      - text: "Zero-Copy：可以直接在不同消費者節點之間進行數據傳輸而無需經過 Broker"
         rationale: "分配策略不影響底層傳輸機制。"
         isCorrect: false
-      - text: "Failover：故障恢復速度最快"
+      - text: "Failover：在消費者發生故障時能提供最快的 Rebalance 速度與數據恢復路徑"
         rationale: "Range Assignor 在 Rebalance 時可能導致較大變動，恢復不一定快。"
         isCorrect: false
-      - text: "Compression：可以提高批次壓縮率"
+      - text: "Compression：可以顯著提高跨 Topic 的批次壓縮率，節省傳輸頻寬與儲存空間"
         rationale: "壓縮通常在 Producer 端進行，與 Consumer 分配無關。"
         isCorrect: false
     hint: "如果你要 Join 兩個 Topic 的資料，你會希望這兩個 Topic 的 Partition 0 都在同一台機器上處理，還是分散在不同機器？"
@@ -312,13 +312,13 @@ questions:
       - text: "冷數據讀取會觸發 OS 的預讀 (Readahead) 機制，將後續磁碟塊加載到 Page Cache"
         rationale: "這是順序讀取的優勢，OS 會預測性地加載資料，掩蓋 I/O 延遲。"
         isCorrect: true
-      - text: "冷數據讀取會繞過 Page Cache 直接使用 Direct I/O"
+      - text: "冷數據讀取會強制繞過 Page Cache，直接透過 Direct I/O 從物理磁碟讀取數據"
         rationale: "Kafka 依賴 Page Cache，通常不使用 Direct I/O。"
         isCorrect: false
-      - text: "冷數據會被優先加載到 JVM Heap 中"
+      - text: "冷數據會被 Broker 優先加載到 JVM Heap 記憶體中，以加速後續相同 Offset 的讀取"
         rationale: "Kafka 盡量避免將大量數據載入 Heap，以減少 GC 壓力。"
         isCorrect: false
-      - text: "讀取冷數據會導致 Broker 暫停寫入以保護磁碟頻寬"
+      - text: "讀取冷數據會觸發 Broker 的流量管制，主動暫停寫入請求以保護磁碟 I/O 頻寬"
         rationale: "Broker 不會主動暫停寫入，但 I/O 競爭可能會導致效能下降。"
         isCorrect: false
     hint: "當你從磁碟讀取舊資料時，作業系統很聰明，它知道你在做順序讀取，所以會幫你「多讀一點」。"
@@ -327,16 +327,16 @@ questions:
     question: "KRaft 模式下，Controller 的故障恢復 (Failover) 為什麼比 ZooKeeper 模式快很多？"
     imageUrl: null
     answerOptions:
-      - text: "因為 KRaft Controller 使用更快的 CPU"
+      - text: "因為 KRaft Controller 要求使用更高規格的 CPU 與 NVMe 磁碟硬體"
         rationale: "硬體不是架構改進的重點。"
         isCorrect: false
-      - text: "因為 Standby Controller 已經在記憶體中同步了最新的元資料，無需從外部系統全量加載"
+      - text: "因為 Standby Controller 預先在記憶體中重放了元資料日誌，不需從外部載入全量數據"
         rationale: "Raft 協議保證了 Follower (Standby) 與 Leader (Active) 的狀態是一致的，切換時只需極短的選舉時間。"
         isCorrect: true
-      - text: "因為 KRaft 不需要選舉 Leader"
+      - text: "因為 KRaft 定義了一種全新的選舉算法，該算法不需要在 Controller 節點間達成共識"
         rationale: "Raft 協議依然需要選舉 Leader。"
         isCorrect: false
-      - text: "因為 KRaft 減少了 Partition 的數量"
+      - text: "因為 KRaft 架構能夠大幅度減少 Partition 的元資料數量，從而降低了同步開銷"
         rationale: "KRaft 反而支援更多的 Partition。"
         isCorrect: false
     hint: "在 ZK 模式下，新 Controller 上任後要先去 ZK 下載所有資料，這很花時間。KRaft 模式下，Standby 節點平時就在「抄筆記」。"
