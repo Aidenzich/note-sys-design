@@ -291,7 +291,19 @@ Kafka 從早期的「至少一次」（At-Least-Once）進化到「精確一次�
 Kafka 支援原子性寫入多個 Partition，這對於 consume-process-produce 模式（如 Kafka Streams）至關重要，確保「讀取資料、處理資料、寫入結果」這三步要麼全部成功，要麼全部失敗。
 
 * **Transaction Coordinator：** 類似 Group Coordinator，負責管理事務的生命週期。  
-* `transaction_state`：** 內部 Topic，用於持久化事務日誌（Write-Ahead Log）。  
+* `transaction_state`：** 內部 Topic，用於持久化事務日誌（Write-Ahead Log）。這是一個 Keyed Topic，Key 是 `TransactionalId`，Value 記錄了事務的當前狀態。  
+* **事務狀態機（Transaction State Machine）：** 事務在生命週期中會經歷以下狀態轉換：
+
+  | 狀態 | 描述 |
+  | :---- | :---- |
+  | **Empty** | 初始狀態，或事務完成後元數據尚未過期的狀態。此時沒有正在進行的事務。 |
+  | **Ongoing** | 生產者已開始事務並向 `Transaction Coordinator` 註冊了至少一個分區。 |
+  | **PrepareCommit** | Coordinator 收到提交請求，正在日誌中記錄「準備提交」的意圖；此後將開始向各分區發送 `Commit Marker`。 |
+  | **PrepareAbort** | Coordinator 判定事務超時或收到中止請求，正在記錄「準備中止」意圖；此後將開始發送 `Abort Marker`。 |
+  | **CompleteCommit** | 所有的 `Commit Marker` 已成功寫入參與分區，事務日誌已更新。 |
+  | **CompleteAbort** | 所有的 `Abort Marker` 已成功寫入參與分區，事務日誌已更新。 |
+  | **Dead** | `TransactionalId` 超時未更新或被手動刪除，狀態元數據將被清理。 |
+
 * **控制訊息（Control Markers）：** 這是 Kafka 事務的黑科技。  
   * 當事務 `提交 commit` 或 `中止 abort` 時，Coordinator 不會去修改已經寫入 `Partition` 的普通訊息（因為日誌是不可變的）。  
   * 相反，它會向所有參與該事務的 `Partition` 寫入一條特殊的 `Control Marker` 或 `Abort Marker`。
