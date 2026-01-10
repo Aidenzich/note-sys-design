@@ -1,4 +1,4 @@
-
+> 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
 
 # MySQL 如何應付大量查詢流量？(Binlog, Slave DB)
 
@@ -130,7 +130,7 @@ Replica SQL Thread 需解析 Binlog 並透過 Storage Engine 寫入資料，其�
 
 要並行執行 SQL 首先要確保 SQL 之間沒有依賴關係，例如：
 
-```sql!
+```sql
 transaction A  
 UPDATE users SET status = 2 WHERE user_id = 1;  
 
@@ -141,7 +141,7 @@ UPDATE users SET status = 1 WHERE status = 2;
 上面案例執行順序不同，產生結果就會不相同，因此有依賴關係。
 最簡單的判斷邏輯就是不同 DB 的 Transaction 彼此絕對沒有依賴關係：
 
-```sql!
+```sql
 transaction A   
 UPDATE db_a.users SET status = 2 WHERE user_id = 1;  
 

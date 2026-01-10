@@ -14,7 +14,7 @@ Transaction ACID 中的 Consistency 要求資料更新前後要符合資料規�
 
 原因在於 Page 儲存資料的格式是 Schema 定義的，例如
 
-```sql!
+```sql
 create table users (  
 	id int auto_increment,  
 	name char(100),  

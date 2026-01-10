@@ -20,7 +20,7 @@ Partition Key 必須是所有 Unique Key 的子集
 
 例如：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -34,7 +34,7 @@ CREATE TABLE orders (
 
 若要用 `created_at` 作為 orders Table Partition 的 Key 是不行的，因為 PK & Unique Key `idx_uuid` 都沒有包含到 `created_at` ，因此需要改成：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -68,7 +68,7 @@ MySQL 提供的四種 Partitioning Types (Range, List, Hash & Key)：
 
 例如依照  `orders` Table 的 `created_at` 欄位，每一年分一個 partition：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -87,7 +87,7 @@ List Partitioning  清單分區 : 定義不同 Value 組別分區
 
 例如需要用 orders Table 裡面的 zip_code 依照不同地區分類：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -109,7 +109,7 @@ List 會限制 `INSERT` 行為，如果有 `zip_code` 無法被分區的情況�
 
 Range 或 List 會要手動擴充或調整 Partition，例如加新的一年到 Range Partition 或者新增新的 `zip_code` 到 List Partition，如果是單純要資料拆成固定 N 個子集，例如將 orders 依照 user_id 隨機分成 5 個 partition，可用 Hash：
 
-```sql!
+```sql
 CREATE TABLE orders (  
    id INT,   
    user_id INT,   
@@ -127,7 +127,7 @@ Key Partitioning  金鑰分區 ：更高效的 Hash Partitioning
 
 Hash Partitioning 只能用單欄位作為 Partition Key，且 Hash 算法較簡單容易碰撞，Key Partitioning 可用多個欄位搭配更複雜的 Hash 演算法，能更平均地分配資料，但也花更多效能。
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -144,7 +144,7 @@ PARTITION 5;
 
 用 Sub Partition 功能可組合多欄位跟不同 Partition Type，例如：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -182,7 +182,7 @@ Hash & Key 的操作相對簡單，透過 COALESCE 減少數量，透過 ADD 增
 
 Linear Hash or Linear Key Partitioning 可以減少 Partition 數量變動時需要搬移的資料量：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -202,7 +202,7 @@ Linear 缺點就是 Partition 數量要為 2 的次方數，且 bit operation �
 
 當需要 Drop 太舊的 Range 或者 List Partition，可先建立一張空 Table，該表不用 Partition 但 Schema 內容要跟 Partition Table 一模一樣，隨後執行 Exchange 指令將 Partition 與 Table 資料交換：
 
-```sql!
+```sql
 ALTER TABLE orders EXCHANGE PARTITION p_2000 WITH TABLE 2000_orders;
 ```
 
@@ -214,7 +214,7 @@ ALTER TABLE orders EXCHANGE PARTITION p_2000 WITH TABLE 2000_orders;
 
 如果切完 Partition 但需要 Full Table Scan 建議使用 explicit partition selection 加程式端並行查詢：
 
-```sql!
+```sql
 thread 1  
 SELECT * FROM orders PARTITION (p1);  
 thread 2  
@@ -225,7 +225,7 @@ SELECT * FROM orders PARTITION (p3);
 
 另外 Secondary Index Tree 也會被切成 Partition，因此即便 Table 有獨立的 Non Unique Index，單獨使用 Index 查詢效能不會提升太多：
 
-```sql!
+```sql
 CREATE TABLE orders (  
 	id INT,  
 	user_id INT,  
@@ -240,7 +240,7 @@ PARTITION 5;
 
 即便 `orders` Table 有 `idx_created_at` Index，執行 `SELECT * FROM orders WHERE created_at = ?` 因為跨 Partition 查詢效能會變差，要使用 explicit partition selection
 
-```sql!
+```sql
 thread 1  
 SELECT * FROM orders PARTITION (p1) WHERE created_at = ?;  
 thread 2  

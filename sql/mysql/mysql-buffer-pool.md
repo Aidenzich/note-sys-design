@@ -76,7 +76,7 @@ Cache Key 結構： <span style="color: orange;">space_id (Tablespace ID) + page
 雖然快取能加速查詢，但如果命中率太低幫助就不大，由於 `INSERT` 也會將資料放在快取，查詢剛建立的資料一定會命中快取，因此<span style="color: orange;">理想的快取命中率要在 98% 左右</span>，如果掉到 95% 以下效能就會有明顯下降
 
 執行
-```sql!
+```sql
 show engine innodb status
 ```
 ![alt text](<imgs/Screenshot 2026-01-10 at 7.12.25 PM.png>)

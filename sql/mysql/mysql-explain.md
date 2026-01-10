@@ -101,14 +101,14 @@ SELECT * FROM t WHERE user_id = 1 UNION ALL SELECT * FROM t WHERE receive_id = 1
 
 **Query 2 - 避免 Range 查詢**
 - 優化前
-```sql!
+```sql
 SELECT * FROM orders WHERE user_id = 1 AND status IN (1,3,5) AND created_at > ?
 
 SELECT * FROM t WHERE (user_id, receive_id) IN ((1, 2), (3, 4), (5, 6))
 ```
 
 優化後
-```sql!
+```sql
 SELECT * FROM orders WHERE user_id = 1 AND status = 2 AND created_at > ? UNION ALL SELECT * FROM orders WHERE user_id = 1 AND status = 3 AND created_at > ? ...
 
 SELECT * FROM t WHERE user_id = 1 AND receive_id = 2 UNION ALL SELECT * FROM t WHERE user_id = 3 AND receive_id = 4 ...
@@ -119,12 +119,12 @@ SELECT * FROM t WHERE user_id = 1 AND receive_id = 2 UNION ALL SELECT * FROM t W
 ### 避免過大的 OFFSET
 
 - 優化前
-```sql!
+```sql
 SELECT * FROM t WHERE user_id = 1 LIMIT 100 OFFSET 9999999999
 ```
 
 - 優化後
-```sql!
+```sql
 SELECT * FROM t JOIN (SELECT id FROM t WHERE user_id = 1 LIMIT 100 OFFSET 9999999999) sub_query ON o.id = sub_query.id WHERE user_id = 1
 ```
 
@@ -133,12 +133,12 @@ SELECT * FROM t JOIN (SELECT id FROM t WHERE user_id = 1 LIMIT 100 OFFSET 999999
 ### 強制 ORDER BY `primary_key` LIMIT N 使用特定 index 做查詢
 
 - 優化前
-```sql!
+```sql
 SELECT * FROM t WHERE uid = 123 ORDER BY id ASC LIMIT 100
 ```
 
 - 優化後
-```sql!
+```sql
 SELECT * FROM t force index(idx_uid) WHERE uid = 123 ORDER BY id ASC LIMIT 100
 ```
 
@@ -147,12 +147,12 @@ SELECT * FROM t force index(idx_uid) WHERE uid = 123 ORDER BY id ASC LIMIT 100
 ### 妥善編排 Query 的執行順序
 
 - 優化前
-```sql!
+```sql
 SELECT COUNT(1), status FROM t WHERE uid = 1 GROUP BY status LIMIT 1000
 ```
 
 - 優化後
-```sql!
+```sql
 SELECT COUNT(1), status FROM ( SELECT status FROM t WHERE uid = 1 LIMIT 1000) GROUP BY status
 ```
 
@@ -164,11 +164,11 @@ SELECT COUNT(1), status FROM ( SELECT status FROM t WHERE uid = 1 LIMIT 1000) GR
 
 ### 避免使用 sql function 在查詢欄位上
 
-```sql!
+```sql
 SELECT * FROM users WHERE id+1 > 100;
 ```
 or
-```sql!
+```sql
 SELECT * FROM dtb_user_main WHERE UPPER(name) = 'vic';
 ```
 

@@ -3,9 +3,44 @@
 # MySQL 的 Lock (Row Lock, Gap Lock & Next-Key Lock)
 Isolation Level Read Committed & Repeatable Read Level 主要是解決 Transaction 併發時，Write Transaction 影響 Read Transaction 的問題，然而除了 Write 影響 Read，還有多個 Write Transaction 併發的情境要解決，例如 Write Skew & Phantom Read。
 
-## 什麼是 Write Skew & Phantom Read 問題
+## 核心概念：手動上鎖語法
 
-Write Skew 是多個 Transaction 同時讀取相同資料，用當下資料狀態判斷邏輯後更新，結果更新內容出現異常，例如扣庫存的 API 這樣實作：
+在 MySQL 中，一般的 `SELECT` 是非阻塞的快照讀（Snapshot Read），若要實現「讀取並鎖定」以防止其他事務修改，需使用以下語法：
+
+*   <span style="color: orange">**`FOR UPDATE` (排他鎖/寫鎖)**</span>：
+    *   告訴 MySQL：「我現在要讀這幾行，而且我**準備要更新**它們，其他人不準動」。
+    *   其他事務無法對這些 Row 加任何鎖（包括讀鎖與寫鎖）。
+*   <span style="color: orange">**`LOCK IN SHARE MODE` (共享鎖/讀鎖)**</span>：
+    *   告訴 MySQL：「我要讀這幾行，大家可以一起讀，但**誰都別想改**」。
+    *   其他事務可以加讀鎖，但無法獲取寫鎖。
+
+## 核心概念：三種行級鎖類型
+
+在深入探討問題前，必須先理解 InnoDB 中三種基礎的行級鎖方案：
+
+1.  **Record Lock (記錄鎖)**：
+    *   **對象**：針對索引記錄本身上鎖。
+    *   **作用**：鎖住特定的 Row，防止其他事務進行 `UPDATE` 或 `DELETE`。
+    *   **範例**：`SELECT * FROM t WHERE id = 1 FOR UPDATE;` 會在 `id=1` 的索引記錄上加鎖（REC_NOT_GAP）。
+
+2.  **Gap Lock (間隙鎖)**：
+    *   **對象**：鎖住索引記錄之間的「間隙」，但不包含記錄本身。
+    *   **作用**：防止其他事務在該間隙中 `INSERT` 資料，主要用於解決 Phantom Read。
+    *   **範例**：若有 id 1, 5，則 `BETWEEN 1 AND 5` 的間隙鎖會防止插入 id=2, 3, 4。
+
+3.  **Next-Key Lock (臨鍵鎖)**：
+    *   **對象**：**Record Lock + Gap Lock** 的組合。
+    *   **作用**：鎖住記錄本身及其前面的間隙（<span style="color: orange">**左開右閉區間**</span>）。
+    *   **特性**：InnoDB 在 `Repeatable Read` 隔離級別下的<span style="color: orange">**默認鎖定單位**</span>。
+    *   **範例**：若索引包含值 10, 20, 30，查詢 `WHERE id = 20 FOR UPDATE` 會產生 `(10, 20]` 的 Next-Key Lock，鎖住 10~20 的間隙以及 20 本身。
+
+---
+
+## 什麼是 Write Skew & Phantom Read 問題
+### Write Skew
+> Write Skew 是多個 Transaction 同時讀取相同資料，用當下資料狀態判斷邏輯後更新，結果更新內容出現異常。
+
+例如扣庫存的 API 這樣實作：
 
 ```sql
 BEGIN
@@ -16,11 +51,13 @@ if quantity > 0
 COMMIT
 ```
 
-瞬間執行多次會導致產品的庫存變成負數，要解決該問題可加上 `FOR UPDATE` 語法：
+由於 `SELECT` 預設是<span style="color: orange">**快照讀 (Snapshot Read)**</span>，當多個 Transaction 同時執行時，它們可能都會讀取到相同的舊資料（例如 `quantity = 1`）。
+
+這導致多個事務都通過了 `if quantity > 0` 的判斷，隨後各自執行 `UPDATE`，最終導致庫存變成負數（Lost Update）。要解決該問題，必須將讀取操作改為<span style="color: orange">**當前讀 (Current Read)**</span>，即加上 `FOR UPDATE` 語法：
 
 ```sql
 BEGIN
-SELECT id, quantity FROM products WHERE id = ? FOR UPDATE;
+SELECT id, quantity FROM products WHERE id = ? FOR UPDATE; -- 加上了 FOR UPDATE
 
 if quantity > 0 
   UPDATE products SET quantity = quantity - 1 WHERE id = ?
@@ -31,15 +68,19 @@ COMMIT
 
 除了加 `FOR UPDATE` 語法外也可寫成
 
-```sql!
+```sql
 UPDATE products SET quantity = quantity - 1 WHERE id = ? AND quantity > 0
 ```
 
 `UPDATE` 語法同樣會上 row lock，瞬間多個 `UPDATE` 執行時也不會有問題。
 
-Phantom Read 則是相同 Transaction 內，對範圍資料執行兩次 SQL 出現的結果不一樣，例如實作一個任務排程：
 
-```sql!
+### Phantom Read
+> Phantom Read 則是相同 Transaction 內，對範圍資料執行兩次 SQL 出現的結果不一樣。
+
+例如實作一個任務排程：
+
+```sql
 BEGIN
 SELECT count(1) FROM tasks WHERE status = '待處理'
 
@@ -68,7 +109,7 @@ Gap Lock 準確來是說對資料的間隙上鎖，例如 `id 1 ~ 10`，有些�
 - T2 在某 row 加 X 鎖前，先在表上加 IX（表級）。
 - T1 想加表 X 鎖時，只查表級：有 IS/IX → 直接等，不用查每行。
 
-MySQL / InnoDB 的「鎖模式相容矩陣」（超重要，面試必背）：
+MySQL / InnoDB 的「鎖模式相容矩陣」（<span style="color: orange">**超重要，面試必背**</span>）：
 四個縮寫代表：
 - **IS（Intention Shared）意向共享鎖**  
   - 表級鎖。  
@@ -108,7 +149,7 @@ Lock 除了 FOR UPDATE 語法的 Write Lock 以外還有 `LOCK IN SHARE MODE` �
 
 假如 tasks Table 中有 10 筆待處理任務，執行 S`ELECT count(1) FROM tasks WHERE status = '待處理' FOR UPDATE` 時會只鎖那 10 筆嗎？
 
-答案是不一定，如果 `status` 有 Index 那確實只會鎖 10 筆，但如果沒有 `status index` 就會 `Lock Table` 了，因為 MySQL 架構是 SQL Layer 跟 Storage Engine 分開，沒命中 index 時，要在 Storage Engine Full Table Scan 後交由 SQL Layer 過濾資料，而上鎖必須在 Storage Engine 完成，若等 SQL Layer 過濾完資料，再告訴 Storage Engine 要上鎖哪些資料，會造成部分命中條件的資料沒上鎖到，因為其他 Transaction 可在 SQL Layer 過濾資料時 Insert or Update，因此要在 Storage Engine Full Table Scan 時上鎖，就變成 Table Lock 了。
+答案是不一定，如果 `status` 有 Index 那確實只會鎖 10 筆，但如果<span style="color: orange">**沒有 `status index` 就會 `Lock Table` 了**</span>，因為 MySQL 架構是 SQL Layer 跟 Storage Engine 分開，沒命中 index 時，要在 Storage Engine Full Table Scan 後交由 SQL Layer 過濾資料，而上鎖必須在 Storage Engine 完成。
 
 Gap Lock 主要發生在範圍查詢 `WHERE id > 10 FOR UPDATE` or 查詢非 unique 索引 `WHERE status = 1 FOR UPDATE` ，但如果查詢條件沒有命中資料時 `WHERE id = 10 FOR UPDATE` ， id 是 `unique primary key`，但 `id = 10` 資料不存在，也有 `Gap Lock` 並會鎖住 `id=10` 前一筆跟後一筆資料的間隙，如果前一筆是 5 後一筆是 15 會鎖 5~15 範圍導致 `INSERT INTO t (id) VALUES (11)` 卡住。
 
@@ -120,15 +161,15 @@ Gap Lock 主要發生在範圍查詢 `WHERE id > 10 FOR UPDATE` or 查詢非 uni
 
 使用 Lock 最大的風險就是 DeadLock，最常見案例是「互相持有並等待」：
 
-```sql!
-## transaction A:
+```sql
+-- transaction A:
 BEGIN
 SELECT * FROM users WHERE id = 1 FOR UPDATE;  
 SELECT * FROM users WHERE id = 2 FOR UPDATE;  
 ...  
 COMMIT;  
   
-## transaction B:  
+-- transaction B:  
 BEGIN
 SELECT * FROM users WHERE id = 2 FOR UPDATE;  
 SELECT * FROM users WHERE id = 1 FOR UPDATE;  
@@ -140,15 +181,15 @@ COMMIT;
 
 該 DeadLock 解法很簡單，將 Lock 順序改成一致就可以了：
 
-```sql!
-## transaction A:  
+```sql
+-- transaction A:  
 BEGIN
 SELECT * FROM users WHERE id = 1 FOR UPDATE;  
 SELECT * FROM users WHERE id = 2 FOR UPDATE;  
 ...  
 COMMIT;  
   
-## transaction B:  
+-- transaction B:  
 BEGIN
 SELECT * FROM users WHERE id = 1 FOR UPDATE;  
 SELECT * FROM users WHERE id = 2 FOR UPDATE;  
@@ -171,8 +212,8 @@ COMMIT;
 
 例如：
 
-```sql!
-### 建立一個 users table 有唯一主鍵 id 以及非唯一 index name  
+```sql
+-- 建立一個 users table 有唯一主鍵 id 以及非唯一 index name  
 create table users (  
 	id int auto_increment,  
 	name varchar(100),  
@@ -181,11 +222,11 @@ create table users (
 	primary key (id)  
 );  
   
-### 建立三筆資料  
+-- 建立三筆資料  
 insert into users (id, name, gender) values  
 (1, 'apple', 0),(2, 'banana',1),(3, 'apple',1);  
   
-### 對 id = 1 唯一索引資料上鎖  
+-- 對 id = 1 唯一索引資料上鎖  
 begin;  
 select * from users where id = 1 for update;  
 ....  
@@ -202,8 +243,8 @@ select * from users where id = 1 for update;
 
 接下來：
 
-```sql!
-### 對 name = 'apple' 非唯一索引資料上鎖  
+```sql
+-- 對 name = 'apple' 非唯一索引資料上鎖  
 BEGIN;  
 select * from users where name = 'apple' for update;  
 ...
@@ -247,7 +288,7 @@ supremum pseudo-record 代表向上無限衍生且不存在的紀錄 ，對該�
 
 當執行
 
-```sql!
+```sql
 BEGIN;  
 SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;  
 ...  
@@ -255,7 +296,7 @@ SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;
 
 上圖，可看到 id (1,2,3) 都有上鎖成功，然後執行
 
-```sql!
+```sql
 BEGIN;  
 SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;  
 ...
@@ -267,9 +308,9 @@ SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;
 
 ## 上鎖順序跟什麼有關?
 
-跟 Index Tree Scan 順序有關，id 的 Index 順序是 1->2->3 ，上鎖順序同樣會是 1->2->3，但如果第二個 SQL 加上 `ORDER BY` 上鎖順序就會相反了：
+跟 <span style="color: orange">**Index Tree Scan 順序**</span>有關，id 的 Index 順序是 1->2->3 ，上鎖順序同樣會是 1->2->3，但如果第二個 SQL 加上 `ORDER BY` 上鎖順序就會相反了：
 
-```sql!
+```sql
 BEGIN
 SELECT * FROM users WHERE id (1, 2, 3) ORDER BY id DESC FOR UPDTE;
 ```
@@ -278,8 +319,10 @@ SELECT * FROM users WHERE id (1, 2, 3) ORDER BY id DESC FOR UPDTE;
 
 除了 `ORDER BY` 會影響上鎖順序外，建立 Index 時使用逆序設定也會影響：
 
-```sql!
-### 將所有 index 改成 unique，並將 nick_name index 順序設定成 DESC  
+
+### 將所有 index 改成 unique，並將 nick_name index 順序設定成 
+```sql
+DESC  
 create table users (  
 	id int auto_increment,  
 	name varchar(100),  
@@ -308,14 +351,14 @@ select * from users where nick_name IN ('apple', 'banana') for update;
 
 在併發寫入情境中，更新順序若相反也會造成 DeadLock，但其實寫入更常見的 DeadLock 是 Gap Lock，例如：
 
-```sql!
-### transaction A  
+```sql
+-- transaction A  
 begin;  
 UPDATE users SET gender=0 WHERE id = 1;  
 if users not found:  
 	INSERT INTO users (gender, id) VALUES (0 , 1);  
   
-### transaction B  
+-- transaction B  
 begin;  
 UPDATE users SET gender=1 WHERE id = 2;  
 if users not found:  
@@ -326,14 +369,14 @@ if users not found:
 
 另外就是加上面 SQL 精簡成 INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0; ，如果 UPDATE 不存在的值會上 Gap Lock 並 INSERT ，此時若多個 Transaction 執行：
 
-```sql!
-### transaction A  
+```sql
+-- transaction A  
 INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0;  
   
-### transaction B  
+-- transaction B  
 INSERT INTO users (id, gender) VALUES (2, 0) ON DUPLICATE KEY UPDATE gender=1;  
   
-### transaction C  
+-- transaction C  
 INSERT INTO users (id, gender) VALUES (3, 0) ON DUPLICATE KEY UPDATE gender=0;
 ```
 
@@ -349,13 +392,13 @@ INSERT INTO users (id, gender) VALUES (3, 0) ON DUPLICATE KEY UPDATE gender=0;
 
 執行 `INSERT INTO orders (customer_id) VALUES (123);` 時，為確保 customers.id=123 這筆資料存在， MySQL 會對 customers id=123 這筆資料上讀鎖，因此如果執行：
 
-```sql!
-### transaction A  
+```sql
+-- transaction A  
 BEGIN:
 INSERT INTO orders (id, customer_id) VALUES (1, 123);
 UPDATE customers SET count=count+1 WHERE id = 123;
 
-### transaction B
+-- transaction B
 BEGIN;
 INSERT INTO orders (id, customer_id) VALUES (2, 123);
 UPDATE customers SET count=count+1 WHERE id = 123;
@@ -365,11 +408,11 @@ Transaction A & B 同時執行，A & B 同時 INSERT orders 成功並對 custome
 
 ## 發生 DeadLock 時，MySQL 會怎麼處理？
 
-MySQL 有 `DeadLock Detection` 的功能，會主動偵測 DeadLock 並 Rollback 其中一個 Transaction，讓另一個 Transaction 順利執行，可透過設定 `innodb_lock_wait_timeout` 參數調整 Transaction 卡住的時間，如果 Transaction 卡住時間超過該參數就會被強制 Rollback。
+MySQL 有 `DeadLock Detection` 的功能，會主動偵測 DeadLock 並 Rollback 其中一個 Transaction，讓另一個 Transaction 順利執行，可透過設定 <span style="color: orange">`innodb_lock_wait_timeout`</span> 參數調整 Transaction 卡住的時間，如果 Transaction 卡住時間超過該參數就會被強制 Rollback。
 
 MySQL 還會紀錄最後一次 DeadLock 的詳細資訊，可以透過執行 `SHOW ENGINE INNODB STATUS` 指令獲取 InnoDB 的詳細資訊，其中 `LATEST DETECTED DEADLOCK Section` 為會紀錄最後兩個造成 DeadLock 的 Transaction 資訊：
 
-```sql!
+```sql
 ------------------------  
 LATEST DETECTED DEADLOCK  
 ------------------------  
@@ -449,15 +492,15 @@ Record lock, heap no 259 PHYSICAL RECORD: n_fields 7; compact format; info bits 
 
 透過上面資訊可以推導，這兩個 Transaction 都拿到了讀鎖，並往下執行 `UPDATE` 獲取寫鎖時互相卡住了，所以完整的 Transaction 應該長這樣：
 
-```sql!
-## Transaction 1  
+```sql
+-- Transaction 1  
 begin;  
 SELECT id, sold FROM products WHERE id = 919 LOCK IN SHARE MODE;  
 ...  
 UPDATE products SET sold = 32 WHERE id = 919  
 commit;  
   
-## Transaction 2  
+-- Transaction 2  
 begin;  
 SELECT id, sold FROM products WHERE id = 919 LOCK IN SHARE MODE;  
 ...  
