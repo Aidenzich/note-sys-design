@@ -1,3 +1,5 @@
+> 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
+
 # MySQL 的 write durability (WAL & Redo Log)
 
 Transaction ACID 中 Durability 要求資料不可遺失，因此一旦 Transaction Commit 後，資料就要寫進硬碟，不能只放在記憶體中。

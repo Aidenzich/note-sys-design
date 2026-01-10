@@ -1,3 +1,5 @@
+> 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
+
 # MySQL 的 Lock (Row Lock, Gap Lock & Next-Key Lock)
 Isolation Level Read Committed & Repeatable Read Level 主要是解決 Transaction 併發時，Write Transaction 影響 Read Transaction 的問題，然而除了 Write 影響 Read，還有多個 Write Transaction 併發的情境要解決，例如 Write Skew & Phantom Read。
 

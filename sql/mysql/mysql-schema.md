@@ -1,3 +1,5 @@
+> 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
+
 # MySQL 的 Schema 管理
 
 Transaction ACID 中的 Consistency 要求資料更新前後要符合資料規則，確保資料正確，而資料規則主要是透過 Schema 來制定的，例如 Data Type & Constraint 等，實務上 Schema 很難建立了就不修改，修改 Schema 的 SQL 雖然很簡單，但其中卻暗藏陷阱，一不小心就會 Lock Table 導致查詢寫入全部卡住。

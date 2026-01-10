@@ -1,3 +1,5 @@
+> 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
+
 # MySQL Atomicity & Isolation (Undo Log & MVCC) 的實現方式
 
 Transaction 的 ACID 是寫入資料的重要功能，而 Atomicity & Isolation 則是工程師最常用且最容易影響讀寫效能的兩大特性。
