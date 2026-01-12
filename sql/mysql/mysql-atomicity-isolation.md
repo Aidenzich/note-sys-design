@@ -4,12 +4,12 @@
 
 Transaction 的 ACID 是寫入資料的重要功能，而 Atomicity & Isolation 則是工程師最常用且最容易影響讀寫效能的兩大特性。
 
-| 特性 | 說明 |
-|------|------|
-| **A**tomicity (原子性) | Transaction 要嘛全部成功，要嘛全部失敗回滾 |
-| **C**onsistency (一致性) | 資料從一個有效狀態轉換到另一個有效狀態 |
-| **I**solation (隔離性) | 並發 Transaction 之間彼此隔離，互不干擾 |
-| **D**urability (持久性) | 一旦 Transaction Commit，資料永久保存不會丟失 |
+| 特性                     | 說明                                          |
+| ------------------------ | --------------------------------------------- |
+| **A**tomicity (原子性)   | Transaction 要嘛全部成功，要嘛全部失敗回滾    |
+| **C**onsistency (一致性) | 資料從一個有效狀態轉換到另一個有效狀態        |
+| **I**solation (隔離性)   | 並發 Transaction 之間彼此隔離，互不干擾       |
+| **D**urability (持久性)  | 一旦 Transaction Commit，資料永久保存不會丟失 |
 
 
 
@@ -87,12 +87,12 @@ Undo Log 中每個 Rollback 節點會有 Pointer 指向前一版本的 Rollback 
 
 MySQL 在 Transaction Begin 時會建立 <span style="color: orange">**Read View**</span>（讀取視圖）結構，暫存在 Memory 中，但是會從 Buffer Pool 跟 Disk 讀取 Undo Log 的資料，用來判斷哪些版本的資料對當前 Transaction 是可見的：
 
-| 欄位 | 說明 |
-|------|------|
-| `m_creator_trx_id` | 當前 Transaction 的 trx_id |
-| `m_ids` | Begin 當下，所有**尚未 Commit** 的 Transaction trx_id 集合 |
-| `m_up_limit_id` | m_ids 中最小的 trx_id（最早的未完成 Transaction） |
-| `m_low_limit_id` | 下一個 Transaction 會拿到的 trx_id（代表未來） |
+| 欄位               | 說明                                                       |
+| ------------------ | ---------------------------------------------------------- |
+| `m_creator_trx_id` | 當前 Transaction 的 trx_id                                 |
+| `m_ids`            | Begin 當下，所有**尚未 Commit** 的 Transaction trx_id 集合 |
+| `m_up_limit_id`    | m_ids 中最小的 trx_id（最早的未完成 Transaction）          |
+| `m_low_limit_id`   | 下一個 Transaction 會拿到的 trx_id（代表未來）             |
 
 **版本可見性判斷演算法**
 
