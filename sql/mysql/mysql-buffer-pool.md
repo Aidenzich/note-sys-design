@@ -75,7 +75,7 @@ Cache Key 結構： <span style="color: orange;">space_id (Tablespace ID) + page
 
 雖然快取能加速查詢，但如果命中率太低幫助就不大，由於 `INSERT` 也會將資料放在快取，查詢剛建立的資料一定會命中快取，因此<span style="color: orange;">理想的快取命中率要在 98% 左右</span>，如果掉到 95% 以下效能就會有明顯下降
 
-執行
+我們可以透過執行以下指令來查看 InnoDB 的運作狀態：
 ```sql
 show engine innodb status
 ```
@@ -109,7 +109,8 @@ show engine innodb status
 
 此時在升級記憶體空間前，我們可以先檢查 Buffer Pool 都塞了什麼資料。
 
-`information_schema` DB 中的 `innodb_buffer_page_lru` Table 紀錄了快取資料，執行 
+`information_schema` 資料庫中的 `innodb_buffer_page_lru` 表格記錄了詳細的快取分頁資訊，我們可以執行以下 SQL 語句來查看具體細節：
+
 ```sql
 SELECT Table_name, Index_name, Data_size from information_schema.innodb_buffer_page_lru where table_name like "{db_name}.%"
 ```
@@ -129,8 +130,7 @@ SELECT * FROM orders WHERE user_id = ?
 
 此外還可發現 primary Index Tree 的 data size 比開其他 index tree 大 ，因此 <span style="color: orange;">SELECT * 不僅查詢較慢還會載入較多資料到記憶體</span>，而 <span style="color: orange;">index 太多時，也會在 insert 時塞入更多 index tree 到 Buffer Pool 中</span>。
 
-因此可先從優化查詢跟減少 index 數量著手，記憶體還是不夠的話，我們還可看 Buffer Pool 中的 Page Type，執行 
-
+因此可先從優化查詢跟減少 index 數量著手，若記憶體還是不夠，我們還可以查看 Buffer Pool 中的 Page Type，執行以下 SQL 語句：
 ```sql
 SELECT DISTINCT (PAGE_TYPE) FROM information_schema.innodb_buffer_page_lru
 ```

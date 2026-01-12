@@ -4,40 +4,60 @@
 
 EXPLAIN 功能，可以在不實際執行 Query 的情況下，查詢 Optimizer 制定的 Query Plan 細節，Explain 出來的內容有：
 
-- prossible_keys ＆ key ：Index 內容
-    - prossible_keys ：query 中可以用的 inedx
-    - key：Optimizer 選中的 index
+### EXPLAIN 欄位概覽
 
-- ref： 與 index key 比較的資料類別
-    - const：使用常數比較 (e.g id = 5)
-    - column name：使用其他表的 column 比較 (e.g o.customer_id = c.customer_id)
-    - func：比較的 index key 有經過 function 處理 (e.g UPPER(name) = 'JOHN')
-    - NULL：沒有等於比較 (e.g id > 5 或全表掃描)
+執行 `EXPLAIN SELECT ...` 時，MySQL 會回傳包含以下欄位的表格：
 
-- type ：Index 的查詢方式
-**效能排序：system > const > eq_ref > ref > range > index > ALL**
-    - system：Table 裡只有一筆 row 或是空的
-    - const：只查詢一筆
-    - eq_ref：查詢條件來自其他表的唯一值，例如 JOIN
-    - ref：= 查詢條件非唯一值
-    - range：範圍查詢 (e.g BETWEEN, >, <, IN …)
-    - index : FULL Index Scan，掃描整個 Secondary Index Tree
-    - ALL : FULL Table Scan，掃描整個 Clustered Index Tree
+| EXPLAIN 欄位 | 回答的問題 |
+|-------------|----------|
+| `id` | 查詢的序號（子查詢會有不同 id） |
+| `select_type` | 查詢類型（SIMPLE、SUBQUERY、UNION 等） |
+| `table` | 這一步查詢的表名 |
+| `possible_keys` | Optimizer 在分析這個 Query 時，根據查詢條件和表的 index 定義，認為「理論上可以使用」的 index 列表。 |
+| `key` | Optimizer **最後選了**哪個 index？ |
+| `key_len` | 用到的 index 長度 |
+| `ref` | 用**什麼值**去查 index？（常數？欄位？函數結果？） |
+| `type` | **怎麼查**這個 index？（全掃？範圍？精確匹配？） |
+| `rows` | 預估掃描的行數 |
+| `filtered` | 過濾後剩餘比例 |
+| `Extra` | 還有**額外做什麼**？（排序？過濾？用臨時表？） |
 
-- extra : 除了 Index Tree 搜尋外的其他操作
-    - using index：只用到 Secondary Index Tree，不需回 Clustered Index Tree 拿完整資料
-    - using filesort：無法使用 index 排序，需要花 CPU 在記憶體中排序
-    - using where : 表示 index tree 無法過濾完資料，還要在記憶體中過濾
-    - using temporary：是否有用臨時表，例如 Union 或 Sub Query，會額外消耗記憶體或硬碟空間
-    - using MMR : 使用 Multi-Range Read (MMR) 優化，通常用在 Range 查詢。
-    - using intersect/union/sort_union：使用 index merge 優化 ，通常用在不同欄位的 OR 條件
-    - using index condition : 使用 composited index 的 index condition pushdown (ICP) 優化
+
+
+![alt text](imgs/image.png)
+
+| 欄位 | 值 | 說明 |
+|------|-----|------|
+| **possible_keys** | - | Query 中可以使用的 index |
+| **key** | - | Optimizer 選中的 index |
+| **ref** | `const` | 使用常數比較 (e.g. `id = 5`) |
+| | `column name` | 使用其他表的 column 比較 (e.g. `o.customer_id = c.customer_id`) |
+| | `func` | 比較的 index key 有經過 function 處理 (e.g. `UPPER(name) = 'JOHN'`) |
+| | `NULL` | 沒有等於比較 (e.g. `id > 5` 或全表掃描) |
+| **type** | `system` | Table 裡只有一筆 row 或是空的 |
+| | `const` | 只查詢一筆 |
+| | `eq_ref` | 查詢條件來自其他表的唯一值 (JOIN) |
+| | `ref` | = 查詢條件非唯一值 |
+| | `range` | 範圍查詢 (BETWEEN, >, <, IN …) |
+| | `index` | FULL Index Scan，掃描整個 Secondary Index Tree |
+| | `ALL` | FULL Table Scan，掃描整個 Clustered Index Tree |
+| **extra** | `using index` | 只用到 Secondary Index，不需回 Clustered Index Tree |
+| | `using filesort` | 無法使用 index 排序，需在記憶體中排序 |
+| | `using where` | index tree 無法過濾完資料，需在記憶體中過濾 |
+| | `using temporary` | 使用臨時表 (Union/Sub Query)，會額外消耗記憶體或硬碟空間 |
+| | `using MRR` | Multi-Range Read 優化，通常用在 Range 查詢 |
+| | `using intersect/union/sort_union` | index merge 優化，通常用在不同欄位的 OR 條件 |
+| | `using index condition` | 使用 composited index 的 ICP 優化 |
+
+> **type 效能排序：** `system` > `const` > `eq_ref` > `ref` > `range` > `index` > `ALL`
+
+
 
 ### MMR (Multi-Range Read) 優化：
-用 secondary index range 查詢且需要回 clustered index 找完整資料時，由於 secondary index 排序跟 primary key 排序不一樣，若依照 secondary index 排序回 clustered index 找資料會造成隨機 I/O，而 MMR 優化是將 secondary index 找到的資料 primary key 暫存到記憶體，排序後批次去 clustered index 查詢，將隨機 I/O 變成順序 I/O。
+用 secondary index range 查詢且需要回 clustered index 找完整資料時，由於 secondary index 排序跟 primary key 排序不一樣，若依照 secondary index 排序回 clustered index 找資料會造成隨機 I/O，而 <span style="color: orange;">MMR 優化是將 secondary index 找到的資料 primary key 暫存到記憶體，排序後批次去 clustered index 查詢，將隨機 I/O 變成順序 I/O。</span>
 
 ### Index Merge 優化：
-使用 OR 時，例如 `SELECT * FROM t WHERe a = 1 OR b = 2`，會分別查詢 Index Tree 並把結果 Merge 起來並移除重複 primary key 資料，再用 Merge 的結果去 Clustered Index 找完整資料，降低去 Clustered Index 查找數量。
+使用 OR 時，例如 `SELECT * FROM t WHERE a = 1 OR b = 2`，會分別查詢 Index Tree 並把結果 Merge 起來並移除重複 primary key 資料，再用 Merge 的結果去 Clustered Index 找完整資料，降低去 Clustered Index 查找數量。
 
 ### ICP (index condition pushdown) 優化：
 使用 index `(a, b, c)` 執行 `SELECT * FROM t WHERE a = ? AND b > ? AND c = ?` 時
