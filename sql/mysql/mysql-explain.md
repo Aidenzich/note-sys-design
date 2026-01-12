@@ -24,7 +24,7 @@ EXPLAIN 功能，可以在不實際執行 Query 的情況下，查詢 Optimizer 
 
 
 
-![alt text](imgs/image.png)
+![alt text](imgs/image-1.png)
 
 | 欄位 | 值 | 說明 |
 |------|-----|------|

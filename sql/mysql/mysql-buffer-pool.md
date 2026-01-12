@@ -48,8 +48,8 @@ Cache Key 結構： <span style="color: orange;">space_id (Tablespace ID) + page
     - **記憶體管理開銷 (Memory Overhead)**：每個快取單位都需要額外的 Metadata（如 Lock、Pointer、LRU 狀態）。
         - 管理一個 16KB 的 Page 只需要一份 Metadata。
         - 若拆解成 100 筆 Row，則需要 100 份 Metadata。這不僅浪費記憶體，更會大幅增加 CPU 在維護快取結構上的負擔（Parsing & Managing）。
-    
 - MySQL 提供兩個 read-ahead 功能優化空間局部性
+    ![alt text](imgs/image.png)
     - **Linear read-ahead**： 如果 extent 中 page 依照硬碟連續空間位置順序被讀取，MySQL 會把物理位置的下一個 extent 透過異步 process 載入到記憶體中，可透過 `innodb_read_ahead_threshold` 參數設定多少個 page 被連續讀取才觸發。
     - **Random read-ahead**： 如果一個 extent 內有許多 page 被隨機讀取，MySQL 會把整個 extent 透過異步 process 載入到記憶體中，可透過 `innodb_random_read_ahead` 開關開啟，官方說如果連續隨機讀取到 13 個 page 才會觸發。
 
