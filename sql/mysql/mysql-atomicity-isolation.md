@@ -4,17 +4,40 @@
 
 Transaction 的 ACID 是寫入資料的重要功能，而 Atomicity & Isolation 則是工程師最常用且最容易影響讀寫效能的兩大特性。
 
+| 特性 | 說明 |
+|------|------|
+| **A**tomicity (原子性) | Transaction 要嘛全部成功，要嘛全部失敗回滾 |
+| **C**onsistency (一致性) | 資料從一個有效狀態轉換到另一個有效狀態 |
+| **I**solation (隔離性) | 並發 Transaction 之間彼此隔離，互不干擾 |
+| **D**urability (持久性) | 一旦 Transaction Commit，資料永久保存不會丟失 |
+
+
+
 ## MySQL Atomicity
 
-直覺思考，可以在資料庫 (記憶體 or 硬碟) 中為每一個 Transaction 建立 private workspace 暫存 Transaction 的異動內容，Commit 時將內容同步到 public workspace 讓其他 Transaction 也看得到，如果 Rollback 就把 private workspace 整個刪除。
+要實現 Atomicity（原子性），資料庫必須能夠在 Transaction 失敗時 **完整回滾** 所有已執行的操作。那麼資料庫該如何實現這個機制呢？
+
+**直覺的做法：Private/Public Workspace 模型**
+
+一個直覺的想法是：為每個 Transaction 建立一個 **private workspace**（私有工作區），用來暫存該 Transaction 的所有異動內容。當 Commit 時，再將 private workspace 的內容同步到 **public workspace**（公共工作區），讓其他 Transaction 也能看到這些變更；如果需要 Rollback，就直接把 private workspace 整個刪除即可。
 
 然而該方法有兩個致命缺陷：
-
-- private workspace 如果只儲存異動內容，Transaction 重複查詢更新結果，就要不斷從 public workspace 擷取 base 紀錄後加上異動內容，耗效能，如果直接儲存更新後的完整記錄又會導致多個 transaction 開啟多個 private workspace 時佔用太多空間。
-
+- private workspace 如果只儲存異動內容，Transaction 重複查詢更新結果，就要不斷從 Public Workspace 擷取 base 紀錄後加上異動內容，耗效能，如果直接儲存更新後的完整記錄又會導致多個 Transaction 開啟多個 private workspace 時佔用太多空間。
 - 另外是 Commit 時要同步多筆資料到 public workspace，較耗時，可能造成 Client 送出 Commit 後，在等待中斷線，導致 DB 收到 Commit 執行完回成功，但 Client 沒收到的不一致狀況，Commit 執行越久不一致風險越大。
 
-因此 MySQL 採用相反的設計，Transaction 中所有更新都會同步到 public workspace，也就是 innodb 中的記憶體和硬碟儲存空間，並另外紀錄 Rollback 內容到 Undo Log 空間中，每個紀錄會有一個隱藏的 Rollback Pointer 欄位去指向 Undo Log 內容，Rollback 時將 Undo Log 內容更新到 public workspace，Commit 時去標記 Undo Log 內容為可刪除，隨後由異步 process 刪除 Undo Log。
+因此 MySQL 採用相反的設計，Transaction 所有更新都會同步到 Public Workspace，也就是 innodb 中的記憶體和硬碟儲存空間，並另外<span style="color: orange">紀錄 Rollback 內容到 Undo Log 空間中，每個紀錄會有一個隱藏的 Rollback Pointer 欄位去指向 Undo Log 內容 </span>，Rollback 時將 Undo Log 內容更新到 public workspace，Commit 時去標記 Undo Log 內容為可刪除，隨後由異步 process 刪除 Undo Log。
+
+> **Undo Log 記錄了什麼？**
+> 
+> Undo Log 記錄的是「如何把資料還原回上一個版本」的資訊：
+> 
+> | 操作類型 | Undo Log 記錄的內容 |
+> |---------|---------------------|
+> | **INSERT** | 新插入 row 的 Primary Key（Rollback 時執行 DELETE） |
+> | **DELETE** | 被刪除 row 的完整內容（Rollback 時重新 INSERT） |
+> | **UPDATE** | 被修改欄位的**舊值**（Rollback 時還原成舊值） |
+> 
+> 每筆 Undo Log 還包含 `trx_id`（Transaction ID，用於 MVCC）和 `roll_pointer`（指向前一版本，形成版本鏈）。
 
 該方法讓 Commit 變快，Undo Log 只儲存異動內容省空間，且 Transaction 可直接重複查詢更新結果，看似完美了，但還是有兩個問題要解決：
 
