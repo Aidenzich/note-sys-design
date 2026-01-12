@@ -41,23 +41,37 @@ Transaction 的 ACID 是寫入資料的重要功能，而 Atomicity & Isolation 
 
 該方法讓 Commit 變快，Undo Log 只儲存異動內容省空間，且 Transaction 可直接重複查詢更新結果，看似完美了，但還是有兩個問題要解決：
 
-多個 Transaction 同時更新同筆資料，如果 A Transaction 要 Rollback，但 B Transaction Commit 了，A Transaction Rollback 內容會蓋掉 B Transaction 的 Commit，結果就是把 B Transaction 也 Rollback 了，因此多個 Transaction 更新相同紀錄時，必須對該紀錄上鎖，直到 Commit or Rollback 才將鎖釋放。
+**問題一：多個 Transaction 同時更新同筆資料的衝突**
 
-因為異動都會先同步到 public workspace，其他 Transaction 也會去 public workspace 讀資料，如果被讀到的資料後來被 Rollback 了，相當於其他 Transaction 讀到了髒資料，而這就是 Isolation 要解決的 Dirty Read 問題， Transaction 不能讀到未 Commit 的資料。
+假設 Transaction A 和 B 同時更新同一筆資料。A 先更新後，B 接著更新，此時 B 的 Undo Log 記錄的是 A 更新後的值。如果 A 要 Rollback，它會把資料還原成 A 更新前的值，但這樣就會<span style="color: orange">覆蓋掉 B 的更新，即使 B 已經 Commit</span>。因此，<span style="color: orange">多個 Transaction 更新相同紀錄時，必須對該紀錄上鎖（Write Lock）</span>，確保同一時間只有一個 Transaction 能修改資料，直到 Commit 或 Rollback 後才釋放鎖。
+
+**問題二：Dirty Read（髒讀）**
+
+因為所有異動都會先同步到 Public Workspace，當 Transaction A 更新資料後還沒 Commit，Transaction B 就可能讀到這筆「尚未確定」的資料。如果 A 後來 Rollback 了，B 讀到的資料就是無效的——這就是 <span style="color: orange">Dirty Read（髒讀）</span>問題。Isolation 的目標之一就是確保 <span style="color: orange">Transaction 不能讀到尚未 Commit 的資料</span>。
 
 ## Dirty Read 的解決方案
 
-簡單的方式就是查詢資料時也上鎖，如果別的 Transaction 正在更新資料，就要等 Commit or Rollback 後才能讀到資料，但該方法在併發時效能太差了，有沒有無鎖的機制？
+簡單的方式就是查詢資料時也上鎖（Read Lock），如果別的 Transaction 正在更新資料，就要等 Commit 或 Rollback 後才能讀到資料。但這樣做會導致<span style="color: orange">讀寫互相阻塞，在高併發場景下效能極差</span>。有沒有無鎖的讀取機制？
 
-Multiversion Concurrency Control (MVCC) 是 MySQL 實現 Isolation 機制的方法，可在無鎖情況下避免Transaction 讀到未 Commit 資料，其靈感類似 Git 版本控制，當你更新檔案 A 時，其他人可讀取檔案 A 的舊版本，不會看到你沒 commit 的修改。
+<span style="color: orange">**Multiversion Concurrency Control (MVCC)**</span> 是 MySQL InnoDB 實現 Isolation 的核心機制，可在**無鎖**情況下避免 Transaction 讀到未 Commit 的資料。
 
-實作 MVCC 必須儲存不同版本的資料，此時 Undo Log 就派上用場，若當前資料是未 Commit 狀態，透過 Undo Log 裡的 Rollback 內容，就能把資料還原成前一個版本，因為更新時會對資料上鎖，因此同時一筆資料只會有一筆未 Commit 紀錄，因此他的前一版一定是已 Commit 的資料。
+> **MVCC 的核心概念**
+> 
+> MVCC 的靈感類似 Git 版本控制：當你正在修改檔案 A 時，其他人仍可讀取檔案 A 的舊版本，不會看到你尚未 commit 的修改。
 
-但 Isolation 除了要解決 Dirty Read 還要解決 Non-repeatable Read，也就是同一個 Transaction 內讀相同紀錄兩次結果要相同，然而如果該紀錄在兩次查詢之間有被更新並 Commit，就會造成第二次查詢結果與第一次不同。
+實作 MVCC 必須儲存不同版本的資料，此時 <span style="color: orange">Undo Log 就同時扮演了兩個角色</span>：既用於 Rollback，也用於提供歷史版本給其他 Transaction 讀取。
+
+如果當前資料是未 Commit 狀態，其他 Transaction 可以透過 Undo Log 把資料還原成前一個版本來讀取。由於更新時會對資料上鎖，同一時間一筆資料只會有一筆未 Commit 的紀錄，因此它的前一版一定是已 Commit 的資料。
+
+透過 MVCC，我們解決了 Dirty Read 問題。但 Isolation 還需要解決另一個問題：<span style="color: orange">**Non-repeatable Read（不可重複讀）**</span>。
+
+這個問題是指：在同一個 Transaction 內讀取相同紀錄兩次，結果應該要相同。然而，如果該紀錄在兩次查詢之間被其他 Transaction 更新並 Commit，就會造成第二次查詢結果與第一次不同，破壞了資料的一致性視圖。
 
 ## Non-repeatable Read 的解決方案
 
-解決 Non-repeatable Read 方法是在 Transaction Begin 時建立資料的 Snapshot，但要把整個資料庫複製一份不現實，可行方式是 Begin 時紀錄資料庫版本號，讀資料發現版本超前時，就透過 Undo Log Rollback 到 Snapshot 版本號，因此 Undo Log 不能只紀錄前一版本的 Rollback，還要維護每筆資料的版本鏈。
+解決 Non-repeatable Read 的概念是：在 Transaction Begin 時建立資料的 <span style="color: orange">**Snapshot（快照）**</span>，讓該 Transaction 在整個執行期間都只看到這個快照版本的資料。
+
+但要把整個資料庫複製一份顯然不現實。可行的方式是：Begin 時紀錄當前的資料庫版本號，當讀取資料發現版本比快照新時，就透過 Undo Log 往回追溯到快照版本。因此，<span style="color: orange">Undo Log 不能只記錄前一版本，還要維護每筆資料的完整版本鏈</span>，讓我們能回溯到任意歷史版本。
 
 Undo Log 中每個 Rollback 節點會有 Pointer 指向前一版本的 Rollback 節點 (如圖)。
 
@@ -65,30 +79,43 @@ Undo Log 中每個 Rollback 節點會有 Pointer 指向前一版本的 Rollback 
 
 (圖片來源：https://www.alibabacloud.com/blog/an-in-depth-analysis-of-undo-logs-in-innodb_598966)
 
-此外，每次 Begin Transaction 時 MySQL 會給一個 global 遞增 ID (trx_id)，當 Transaction 更新資料時，會把 trx_id 同步寫到 B+Tree & Undo Log 節點中，因此 trx_id 就是資料庫的版本號。
+此外，每次 Begin Transaction 時，MySQL 會分配一個<span style="color: orange">全域遞增的 ID（trx_id）</span>。當 Transaction 更新資料時，會把這個 trx_id 同步寫到 B+Tree 的資料頁和 Undo Log 節點中。因此，<span style="color: orange">trx_id 就是版本號</span>，透過比較 trx_id 就能知道資料是在何時被修改的。
 
 ### 如何決定要 Rollback 到哪個版本？
 
 由於 Transaction 會同時 Begin 多個，無法單純 Rollback Begin 之前的 trx_id，需要透過演算法來決定 Transaction 能讀到哪個版本。
 
-MySQL 在 Transaction Begin 時會建立 Page View 結構：
+MySQL 在 Transaction Begin 時會建立 <span style="color: orange">**Read View**</span>（讀取視圖）結構，用來判斷哪些版本的資料對當前 Transaction 是可見的：
 
-- m_creator_trx_id：當前 transaction 的 trx_id。
-- m_ids：Begin transaction 的當下，所有未 Commit 的 transactions trx_id 集合。
-- m_up_limit_id：m_ids 集合中最小的 Trx ID
-- m_low_limit_id：下一個 Transaction Begin 時會拿到的 trx_id，也就是未來的版本。並透過下面算法決定哪個版本可讀：id 代表資料當前版本，判斷可否讀規則如下：
-    1. 如果 id == m_creator_trx_id 代表是自己修改的紀錄，return true
-    2. 如果 id < m_up_limit_id 代表在 Begin 前就 Commit 了，return true
-    3. 如果 id ≥ m_low_limit_id 代表在 Begin 後才出現的，return false
-    4. 如果 m_up_limit_id ≤ id < m_low_limit_id ，且 id 在 m_ids 裡面，代表在 Begin 當下還沒 commit ，return false
-    5. 如果 m_up_limit_id ≤ id < m_low_limit_id，且 id 不在 m_ids 裡面，代表在 Begin 當下已經 commit ，return true
-若 return false 就要透過 rollback pointer 往前一版本 rollback，重複檢查直到 return true。
+| 欄位 | 說明 |
+|------|------|
+| `m_creator_trx_id` | 當前 Transaction 的 trx_id |
+| `m_ids` | Begin 當下，所有**尚未 Commit** 的 Transaction trx_id 集合 |
+| `m_up_limit_id` | m_ids 中最小的 trx_id（最早的未完成 Transaction） |
+| `m_low_limit_id` | 下一個 Transaction 會拿到的 trx_id（代表未來） |
+
+**版本可見性判斷演算法**
+
+當讀取一筆資料時，設該資料的版本號為 `id`，透過以下規則判斷是否可讀：
+
+```
+1. id == m_creator_trx_id → ✅ 可讀（自己修改的）
+2. id < m_up_limit_id     → ✅ 可讀（Begin 前就已 Commit）
+3. id ≥ m_low_limit_id    → ❌ 不可讀（Begin 後才出現）
+4. id 在 m_ids 中         → ❌ 不可讀（Begin 時尚未 Commit）
+5. id 不在 m_ids 中       → ✅ 可讀（Begin 時已 Commit）
+```
+
+若判斷為不可讀，就透過 `roll_pointer` 往前一版本追溯，重複檢查直到找到可讀的版本。
 
 ## Transaction 執行太久會怎麼樣？
 
-Transaction 的執行時間對效能是有顯著影響的，若 Transaction 執行很久沒有 Commit/Rollback 會有兩個問題：
+Transaction 的執行時間對效能有顯著影響。若 Transaction 執行很久沒有 Commit/Rollback，會造成兩個問題：
 
-1. Begin 之後的 Undo Log 版本持續累積，查詢資料需要 Rollback 很多層
-2. 為了要 Rollback 到 Begin 時的版本，Begin 版本後的 Rollback 節點都不能刪除，導致 Undo Log 資料太大，佔用過多記憶體會影響資料快取命中率降低查詢效能。
+1. **查詢效能下降**：該 Transaction 讀取資料時，可能需要沿著 Undo Log 版本鏈往回追溯很多層才能找到可見版本
+2. <span style="color: orange">**Undo Log 無法清理**</span>：為了讓長時間執行的 Transaction 能回溯到 Begin 時的版本，這期間所有的 Undo Log 節點都不能刪除，導致 Undo Log 空間持續膨脹，佔用過多記憶體會影響 Buffer Pool 的快取命中率
 
-不過上述問題是在 Isolation Level Repeatable Read (不能 Non-repeatable Read ) 時發生，如果是 Read Committed (不能 Dirty Read) MySQL 是每次查詢都建立 Page View，因此會查詢到後來 Commit 的資料。
+> [!IMPORTANT]
+> 上述問題主要發生在 **Repeatable Read** 隔離級別。在此級別下，Read View 只在 Transaction Begin 時建立一次。
+> 
+> 若使用 **Read Committed** 級別，MySQL 會在<span style="color: orange">每次查詢時都重新建立 Read View</span>，因此可以看到其他 Transaction 最新 Commit 的資料，Undo Log 也能更快被清理。
