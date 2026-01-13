@@ -156,39 +156,66 @@ MySQL 使用 <span style="color: orange">**Gap Lock (間隙鎖)**</span> 來解�
 3.  **無窮大鎖定 (Supremum)**：
     如果查詢條件是 `WHERE id > 10 FOR UPDATE`，為了防止別人在 10 之後插入任何新資料（例如 `id=100`），MySQL 會鎖住 `(10, +∞)` 的範圍。這在實現上是通過鎖定一個特殊的 `supremum pseudo-record` 來達成的。
 
-## 為什麼需要意向鎖？（效能考量）
+## 什麼是意向鎖 (Intention Lock)？
+> [!NOTE]
+> 意向鎖（Intention Lock）是 InnoDB 中的一種 **Table Level Lock (表級鎖)**。
+>
+> 它的出現是為了解決 **Table Lock 與 Row Lock 的衝突問題**：
+> 當 Transaction 想要對「整張表」加鎖（Table Lock）時，必須確保**這張表內沒有任何一行資料正在被鎖定**。
+>
+> 為了避免「逐行檢查」每一行是否有 Row Lock（效率太差），InnoDB 設計了意向鎖作為一個「表級訊號燈」：
+> 當 Transaction 鎖住某行時，會先在表上掛一個 Intention Lock，告訴稍後想鎖整張表的人：「裡面有人正在忙（鎖住某些行），請你先在外面等」。
 
-問題場景：T1 想對整個表加 X 鎖（Table lock），但表裡很多 row 已被其他 transaction 持有 row lock。如果沒 intention lock，T1 得逐行檢查「這 row 有沒有被鎖」，這是 O(n) 災難。
 
-意向鎖解決方案：
-- T2 在某 row 加 X 鎖前，先在表上加 IX（表級）。
-- T1 想加表 X 鎖時，只查表級：有 IS/IX → 直接等，不用查每行。
+> [!TIP]
+>| 縮寫 | 全名 (English) | 中文名稱 | 鎖定範圍 | 說明 |
+>|---|---|---|---|---|
+>| **IS** | **Intention Shared Lock** | 意向共享鎖 | Table (表級) | 預告「我**打算**去鎖（讀）某些 Row」。相容性高，不擋人。 |
+>| **IX** | **Intention Exclusive Lock** | 意向排他鎖 | Table (表級) | 預告「我**打算**去鎖（改）某些 Row」。用來卡住 `LOCK TABLES`。 |
+>| **S** | **Shared Lock** | 共享鎖 (讀鎖) | Table / Row | 大家都只能讀，不能改。 |
+>| **X** | **Exclusive Lock** | 排他鎖 (寫鎖) | Table / Row | 只有我可以讀寫，其他人滾蛋（不能讀也不能寫）。 |
+
+
+
+它分為兩種：
+- **IS（Intention Shared）意向共享鎖**  
+  - 意思是「這個交易**打算**在某些 `row` 上加共享鎖 `S`」。  
+  - 舉例：執行 `SELECT * FROM users WHERE id=1 LOCK IN SHARE MODE;`
+    1.  MySQL 先對 `users` 表加 **IS 鎖**。
+    2.  接著才對 `id=1` 這行資料加 **S 鎖**。
+- **IX（Intention Exclusive）意向排他鎖**  
+  - 意思是「這個交易**打算**在某些 `row` 上加排他鎖 `X`」。  
+  - 舉例：執行 `UPDATE users SET age=30 WHERE id=1;`
+    1.  MySQL 先對 `users` 表加 **IX 鎖**。
+    2.  接著才對 `id=1` 這行資料加 **X 鎖**。
+
+
+
+### 為什麼需要意向鎖？（效能考量）
+
+如果沒有意向鎖，當 **Transaction 1 想對整個表加 X 鎖**，而 **Transaction 2 持有 Row Lock** 時，效能差異巨大。
+下表以 T1 (Table Lock) 與 T2 (Row Lock) 的互動為例：
+
+| 動作階段 | 沒有意向鎖 | 有意向鎖 (Intention Lock) |
+| :--- | :--- | :--- |
+| **T2 加 Row Lock 時** | T2 默默鎖住某一行，不通知任何人 (Only Row Lock)。 | T2 在鎖行前，必須先在表頭掛上 **IS / IX 鎖** (插旗)。 |
+| **T1 加 Table Lock 時** | T1 必須**逐行掃描 (Full Table Scan)** 確認沒人鎖住任何一行。 | T1 只需要**檢查表頭**有沒有被插旗 (IS / IX)。 |
+| **判斷效率** | **O(n)**：資料越多越慢，效能災難。 | **O(1)**：瞬間完成，看到旗子就乖乖排隊。 |
+
+**結論**：意向鎖就像是一個「入口處的紅綠燈」，讓想鎖整張表的人 (T1) 不用跑進去巡視一圈，就能知道裡面有沒有人 (T2)。
+
+### 鎖模式相容矩陣
 
 MySQL / InnoDB 的「鎖模式相容矩陣」（<span style="color: orange">**超重要，面試必背**</span>）：
-四個縮寫代表：
-- **IS（Intention Shared）意向共享鎖**  
-  - 表級鎖。  
-  - 意思是「這個交易**打算**在某些 row 上加共享鎖 S」。  
-  - 典型來源：`SELECT ... LOCK IN SHARE MODE` 會在表上拿 IS，再對符合條件的 row 拿 S 鎖。
-- **IX（Intention Exclusive）意向排他鎖**  
-  - 表級鎖。  
-  - 意思是「這個交易**打算**在某些 row 上加排他鎖 X」。  
-  - 典型來源：`SELECT ... FOR UPDATE`、`UPDATE`、`DELETE` 等 DML，會先在表上拿 IX，再對具體 row 拿 X 鎖。
-- **S（Shared Lock）共享鎖**  
-  - 可以是 row 級，也可以是表級。  
-  - 拿到 S 鎖的交易可以讀，不可以改；多個 S 可以同時存在。  
-  - 例如 `SELECT ... LOCK IN SHARE MODE` 在符合條件的 row 上會加 S 鎖。
-- **X（Exclusive Lock）排他鎖**  
-  - 可以是 row 級，也可以是表級。  
-  - 拿到 X 鎖的交易可以讀寫該 row / 表，且不允許其他任何交易再對同一資源拿 S 或 X。  
-  - 例如 `UPDATE ...`、`DELETE ...`、`LOCK TABLES ... WRITE` 會對目標加 X 鎖。
 
 ![Screenshot 2026-01-06 at 18.25.57](https://hackmd.io/_uploads/r1wGQP9VWg.png)
 
-- IS/IX 之間相容（允許多個 transaction 同時宣告意向）
-- 但表 X 鎖會被任何 IS/IX 阻塞
-- IS、IX 彼此大多相容，因為只是「意向」，允許多個交易同時打算鎖不同行。  
-- 真正會互相衝突的是 S / X 這兩種「實體讀寫鎖」，特別是 X 幾乎跟所有其他模式都不相容。
+- **IS/IX 之間完全相容**：
+  因為它們都只是「意向」，代表「我打算鎖某幾行」。Transaction A 打算鎖 id=1 (加 IX)，Transaction B 打算鎖 id=2 (加 IX)，這兩件事在「表級」上是不衝突的，所以可以共存。
+- **意向鎖會阻塞表級鎖**：
+  表級 X 鎖（如 `LOCK TABLES ... WRITE`）會被任何 IS/IX 阻塞，這也是意向鎖存在的主要目的。
+- **真正的衝突發生在 Row Level**：
+  S / X 才是真正的讀寫鎖。雖然表上的 IX 和 IX 相容，但如果你們剛好都要鎖同一行 Row，那下面的 Row Lock (X) 就會互斥。
 
 ## 除了 Row Lock, Gap Lock & Next-Key Lock 還有其他種 Lock 嗎？
 
