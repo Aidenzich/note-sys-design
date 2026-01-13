@@ -5,8 +5,9 @@
 | [x] | Basic | [mysql-basic.md](./mysql-basic.md) | MySQL 概覽與基礎知識 |
 | [x] | Buffer Pool | [mysql-buffer-pool.md](./mysql-buffer-pool.md) | 緩衝池機制 |
 | [x] | Atomicity & Isolation | [mysql-atomicity-isolation.md](./mysql-atomicity-isolation.md) | 原子性與隔離性 (ACID) |
+| [x] | Transaction | [mysql-transaction.md](./mysql-transaction.md) | 交易機制 |
 | [x] | Lock | [mysql-lock.md](./mysql-lock.md) | 鎖機制與並發控制 |
-| [ ] | Explain | [mysql-explain.md](./mysql-explain.md) | SQL 執行計畫分析 |
+| [x] | Explain | [mysql-explain.md](./mysql-explain.md) | SQL 執行計畫分析 |
 | [ ] | Write Durability | [mysql-write-durability.md](./mysql-write-durability.md) | 寫入持久性機制 |
 | [ ] | Flush | [mysql-flush.md](./mysql-flush.md) | Flush 刷新機制 |
 | [ ] | Schema | [mysql-schema.md](./mysql-schema.md) | Schema 設計原則 |
