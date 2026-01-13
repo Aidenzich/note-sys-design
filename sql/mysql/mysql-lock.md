@@ -1,12 +1,10 @@
 > 📌 此文件來自 https://ithelp.ithome.com.tw/users/20177857/ironman 的 IT 邦鐵人賽教程，僅針對個人學習用途進行筆記與修改。
 
 # MySQL 的 Lock (Row Lock, Gap Lock & Next-Key Lock)
-Isolation Level Read Committed & Repeatable Read Level 主要是解決 Transaction 併發時，Write Transaction 影響 Read Transaction 的問題，然而除了 Write 影響 Read，還有多個 Write Transaction 併發的情境要解決，例如 Write Skew & Phantom Read。
+隔離等級 `Read Committed` & `Repeatable Read` 主要是解決 Transaction 併發時，Write Transaction 影響 Read Transaction 的問題，然而除了 Write 影響 Read，還有多個 Write Transaction 併發的情境要解決，例如 `Write Skew` & `Phantom Read`。
 
-## 核心概念：手動上鎖語法
-
+## 上鎖語法
 在 MySQL 中，一般的 `SELECT` 是非阻塞的快照讀（Snapshot Read），若要實現「讀取並鎖定」以防止其他事務修改，需使用以下語法：
-
 *   <span style="color: orange">**`FOR UPDATE` (排他鎖/寫鎖)**</span>：
     *   告訴 MySQL：「我現在要讀這幾行，而且我**準備要更新**它們，其他人不準動」。
     *   其他事務無法對這些 Row 加任何鎖（包括讀鎖與寫鎖）。
@@ -17,6 +15,39 @@ Isolation Level Read Committed & Repeatable Read Level 主要是解決 Transacti
 ## 核心概念：三種行級鎖類型
 
 在深入探討問題前，必須先理解 InnoDB 中三種基礎的行級鎖方案：
+
+
+```
+索引數據：    10          20          30
+位置標記：    |           |           |
+              ●-----------●-----------●
+
+┌─────────────────────────────────────────────────────┐
+│  Record Lock: 只鎖記錄本身                            │
+│               不鎖間隙                               │
+│                      [●]                            │
+│                      20                             │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│  Gap Lock: 只鎖間隙                                  │
+│            不鎖端點記錄                               │
+│              (---------)                            │
+│              10        20                           │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│  Next-Key Lock: 鎖間隙 + 右端點記錄 (左開右閉)          │
+│                 InnoDB 默認鎖定方式                   │
+│              (---------●]                           │
+│              10        20                           │
+└─────────────────────────────────────────────────────┘
+```
+*   `●` 代表索引記錄（實心圓點）
+*   `[●]` 代表只鎖定該記錄
+*   `(---)` 代表鎖定間隙，但不含兩端記錄（開區間）
+*   `(---●]` 代表鎖定間隙加上右端記錄（左開右閉區間）
+
 
 1.  **Record Lock (記錄鎖)**：
     *   **對象**：針對索引記錄本身上鎖。
@@ -34,20 +65,22 @@ Isolation Level Read Committed & Repeatable Read Level 主要是解決 Transacti
     *   **特性**：InnoDB 在 `Repeatable Read` 隔離級別下的<span style="color: orange">**默認鎖定單位**</span>。
     *   **範例**：若索引包含值 10, 20, 30，查詢 `WHERE id = 20 FOR UPDATE` 會產生 `(10, 20]` 的 Next-Key Lock，鎖住 10~20 的間隙以及 20 本身。
 
----
+
 
 ## 什麼是 Write Skew & Phantom Read 問題
 ### Write Skew
+> [!NOTE]
 > Write Skew 是多個 Transaction 同時讀取相同資料，用當下資料狀態判斷邏輯後更新，結果更新內容出現異常。
+> 它是一種典型的 **Race Condition (競態條件)**，屬於 **Check-Then-Act (先檢查後執行)** 的類型。如果不加鎖，並發的事務會基於「各自看到的舊版本快照」進行判斷，導致錯誤的業務邏輯執行（如上述庫存變負數）。
 
 例如扣庫存的 API 這樣實作：
 
 ```sql
 BEGIN
-SELECT id, quantity FROM products WHERE id = ?;
+  SELECT id, quantity FROM products WHERE id = ?;
 
-if quantity > 0 
-  UPDATE products SET quantity = quantity - 1 WHERE id = ?
+  if quantity > 0 
+    UPDATE products SET quantity = quantity - 1 WHERE id = ?
 COMMIT
 ```
 
@@ -57,10 +90,10 @@ COMMIT
 
 ```sql
 BEGIN
-SELECT id, quantity FROM products WHERE id = ? FOR UPDATE; -- 加上了 FOR UPDATE
+  SELECT id, quantity FROM products WHERE id = ? FOR UPDATE; -- 加上了 FOR UPDATE
 
-if quantity > 0 
-  UPDATE products SET quantity = quantity - 1 WHERE id = ?
+  if quantity > 0 
+    UPDATE products SET quantity = quantity - 1 WHERE id = ?
 COMMIT
 ```
 
@@ -76,30 +109,52 @@ UPDATE products SET quantity = quantity - 1 WHERE id = ? AND quantity > 0
 
 
 ### Phantom Read
+> [!NOTE]
 > Phantom Read 則是相同 Transaction 內，對範圍資料執行兩次 SQL 出現的結果不一樣。
 
-例如實作一個任務排程：
+例如我們想統計並處理 id 1~10 的訂單：
 
 ```sql
 BEGIN
-SELECT count(1) FROM tasks WHERE status = '待處理'
-
-if count <= 10
-   UPDATE tasks SET status = '處理中' WHERE status = '待處理'
+  -- 第一次查詢：原本只有 id=1, 3, 5 三筆資料
+  SELECT * FROM orders WHERE id BETWEEN 1 AND 10 FOR UPDATE;
+  
+  -- 業務邏輯處理...
+  
+  -- 如果此時沒有 Gap Lock，另一個 Transaction 插入了 id=2
+  -- INSERT INTO orders (id) VALUES (2);
+  
+  -- 再次查詢或更新：發現多了一筆 id=2 的資料（幻影）
+  UPDATE orders SET status = 'DONE' WHERE id BETWEEN 1 AND 10;
 COMMIT
 ```
 
-原本邏輯是最多一次處理 10 筆，但如果有其他 Transaction 在 `SELECT count(1)` 之後 `UPDATE` 之前執行 `INSERT INTO tasks (status) VALUES ('待處理')` 使得待處理任務數量超過 10，那麼 `UPDATE` 出來的結果就會超過 10 筆，不符合預期。
+原本預期只處理 3 筆，結果卻處理了 4 筆，這就是 Phantom Read。
 
-如果在 `SELECT count(1)` 上加上 `FOR UPDATE` 的 `row lock` 能解決嗎？
+> [!CAUTION]
+> 如果只用一般的 `Record Lock` (鎖住 id=1, 3, 5) 能解決嗎？
+> 答案是不能，因為 `INSERT id=2` 並沒有碰到任何現存的鎖，所以會成功插入，導致下一次查詢或更新範圍時出現「幻影」。
 
-答案是不能，因為 `row lock` 只會鎖住查詢出的 10 筆資料，`INSERT` 並沒有對那 10 筆資料做任何讀寫，所以 `row lock` 不會卡住 `INSERT` 無法解決 Phantom Read 問題。
 
-## 那麼什麼樣的鎖可以解決 Phantom Read 問題？
+#### 那麼什麼樣的鎖可以解決 `Phantom Read` 問題？
 
-MySQL 使用 `Gap Lock` 阻擋 Transaction 對特定範圍 `INSERT` 資料，而會阻擋哪些範圍，是透過 Index 排序跟查詢條件有關，例如 `SELECT id FROM orders WHERE id BETWEEN 1 AND 10 FOR UPDATE` **除了有 row lock 外，還有 `id 1 ~ 10` 範圍的 Gap Lock**，用來阻擋 `INSERT orders (id) VALUES (5)` 這類 SQL。
+MySQL 使用 <span style="color: orange">**Gap Lock (間隙鎖)**</span> 來解決 Phantom Read。它的核心思想是：**不僅鎖住存在的記錄，還要鎖住記錄之間的「空隙」，防止別人插入新資料**。
 
-Gap Lock 準確來是說對資料的間隙上鎖，例如 `id 1 ~ 10`，有些查詢是 `WHERE id >= 10 FOR UPDATE` 就會對 **10 ~ 無限大 範圍上 Gap Lock，另外 Row Lock + Gap Lock 的組合又稱為 Next-Key Lock**，例如 `orders Table 有 id(1, 3, 5)` 三筆資料，執行 `SELECT id FROM orders WHERE id BETWEEN 1 AND 10 FOR UPDATE` 就會對 (1, 3, 5) 上 Row Lock 跟 id 1 ~ 10 上 Gap Lock。
+具體來說（以上述 orders 表為例）：
+
+1.  **鎖定範圍**：
+    當執行 `SELECT * FROM orders WHERE id BETWEEN 1 AND 10 FOR UPDATE` 時：
+    *   除了對存在的 `id=1, 3, 5` 上 **Row Lock**。
+    *   還會對 `(1, 3)`, `(3, 5)`, `(5, 10]` 這些區間上 **Gap Lock**。
+    *   結果：任何想要 `INSERT` 到這些範圍的動作（例如 `id=2` 或 `id=4`）都會被阻擋，從而消滅了幻讀。
+
+2.  **Next-Key Lock**：
+    在 Repeatable Read (RR) 級別下，InnoDB 預設使用的其實是 **Next-Key Lock**，也就是 **Row Lock + Gap Lock** 的組合。
+    *   它鎖定的是一個「左開右閉」的區間。
+    *   例如：鎖定 `(1, 3]` 代表鎖住 1~3 的間隙以及 3 本身。
+
+3.  **無窮大鎖定 (Supremum)**：
+    如果查詢條件是 `WHERE id > 10 FOR UPDATE`，為了防止別人在 10 之後插入任何新資料（例如 `id=100`），MySQL 會鎖住 `(10, +∞)` 的範圍。這在實現上是通過鎖定一個特殊的 `supremum pseudo-record` 來達成的。
 
 ## 為什麼需要意向鎖？（效能考量）
 

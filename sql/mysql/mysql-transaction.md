@@ -126,7 +126,16 @@ block-beta
 
 ---
 
-## 總結：快照讀 vs 當前讀
 
-- **快照讀 (Snapshot Read)**：普通的 `SELECT`。不加鎖，利用 MVCC 讀取歷史版本。
-- **當前讀 (Current Read)**：`INSERT`, `UPDATE`, `DELETE`, `SELECT ... FOR UPDATE`。必須讀取最新版本，且會加鎖保護。
+## 7. 快照讀、當前讀與隔離級別的關係
+
+快照讀與當前讀的行為差異，正是 MySQL 實作不同隔離級別（Isolation Level）的核心手段。
+> [!NOTE]
+> - **快照讀 (Snapshot Read)**：普通的 `SELECT`。不加鎖，利用 MVCC 讀取歷史版本。
+> - **當前讀 (Current Read)**：`INSERT`, `UPDATE`, `DELETE`, `SELECT ... FOR UPDATE`。必須讀取最新版本，且會加鎖保護。
+
+
+| 讀取模式 | 語法範例 | 在 Repeatable Read (RR) 的行為 | 在 Read Committed (RC) 的行為 |
+| :--- | :--- | :--- | :--- |
+| **Snapshot Read**<br>(快照讀) | `SELECT ...` | **第一次**讀取時生成 Read View<br>(整個事務共用一個，看到舊的) | **每次**讀取都生成 Read View<br>(隨時能看到別人剛 Commit 的) |
+| **Current Read**<br>(當前讀) | `SELECT ... FOR UPDATE`<br>`UPDATE`<br>`DELETE` | 使用 **Next-Key Lock**<br>(鎖記錄 + 鎖間隙，防幻讀) | 僅使用 **Record Lock**<br>(只鎖記錄，不防幻讀) |
