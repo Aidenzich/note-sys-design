@@ -206,38 +206,110 @@ MySQL 使用 <span style="color: orange">**Gap Lock (間隙鎖)**</span> 來解�
 
 ### 鎖模式相容矩陣
 
-MySQL / InnoDB 的「鎖模式相容矩陣」（<span style="color: orange">**超重要，面試必背**</span>）：
+> [!WARNING]
+> <span style="color: orange">**超重要，面試必背**</span>：
 
-![Screenshot 2026-01-06 at 18.25.57](https://hackmd.io/_uploads/r1wGQP9VWg.png)
+
+
+| Request \ Existing | IS (意向共享) | IX (意向排他) | S (共享鎖) | X (排他鎖) |
+| :--- | :---: | :---: | :---: | :---: |
+| **IS (意向共享)** | ✅ 相容 | ✅ 相容 | ✅ 相容 | ❌ 衝突 |
+| **IX (意向排他)** | ✅ 相容 | ✅ 相容 | ❌ 衝突 | ❌ 衝突 |
+| **S (共享鎖)** | ✅ 相容 | ❌ 衝突 | ✅ 相容 | ❌ 衝突 |
+| **X (排他鎖)** | ❌ 衝突 | ❌ 衝突 | ❌ 衝突 | ❌ 衝突 |
 
 - **IS/IX 之間完全相容**：
   因為它們都只是「意向」，代表「我打算鎖某幾行」。Transaction A 打算鎖 id=1 (加 IX)，Transaction B 打算鎖 id=2 (加 IX)，這兩件事在「表級」上是不衝突的，所以可以共存。
 - **意向鎖會阻塞表級鎖**：
-  表級 X 鎖（如 `LOCK TABLES ... WRITE`）會被任何 IS/IX 阻塞，這也是意向鎖存在的主要目的。
+  表級 X 鎖（如 `LOCK TABLES ... WRITE`）會被任何 IS/IX 阻塞。
 - **真正的衝突發生在 Row Level**：
   S / X 才是真正的讀寫鎖。雖然表上的 IX 和 IX 相容，但如果你們剛好都要鎖同一行 Row，那下面的 Row Lock (X) 就會互斥。
 
-## 除了 Row Lock, Gap Lock & Next-Key Lock 還有其他種 Lock 嗎？
+> [!TIP]
+> 
+> 這裡常容易混淆，我們必須釐清「鎖的屬性」與「鎖的模式」：
+>
+> 1.  **IS (意向共享) & IX (意向排他)**：
+>     *   <span style="color: red">**永遠是表級鎖 (Table Lock)**</span>。
+>     *   它們是掛在「表頭」上的旗標，用來表示「這張表裡面某處，有人正在（或打算）鎖定某些行」。
+>
+> 2.  **S (共享鎖) & X (排他鎖)**：
+>     *   <span style="color: orange">**既可以是表級，也可以是行級**</span>，看語境：
+>       *   **Row Level**：`SELECT ... FOR UPDATE` (X) 或 `UPDATE` (X) 是加在特定 **Row** 上的。
+>       *   **Table Level**：`LOCK TABLES t WRITE` 是加在整張 **Table** 上的。
+> 
+> 意向鎖 (IS/IX) 的主要存在目的，就是為了擋住那種「想要鎖死整張表 (Table X)」的人。
+>
+> | 鎖類型 | 級別 | 作用 | 誰會擋誰？ (衝突點) |
+> | :--- | :--- | :--- | :--- |
+> | **IS / IX** | **Table Only** | 門口的號誌燈 (Flag) | 專門用來擋 **Table S / Table X** (例如 `LOCK TABLES`) |
+> | **Row S / Row X** | **Row** | 真正的資料鎖 | 擋其他的 **Row S / Row X** (搶同一行資料時) |
+> | **Table S / Table X** | **Table** | 鎖死整張表 | 擋住所有人 (如果表內有任何 IS/IX 都不行) |
 
-Lock 除了 FOR UPDATE 語法的 Write Lock 以外還有 `LOCK IN SHARE MODE` 的 Read Lock，Read Lock 互相不會卡住，但 Read & Write Lock 互相會卡住。
+## Wrap Up：鎖的模式與粒度
 
-此外還有 Table Lock 會直接鎖住整張表，例如執行 `LOCK TABLE orders WRITE` or `LOCK TABLE orders READ` 會對整張表上寫鎖 or 讀鎖。
+> 前面提到了很多鎖，這裡簡單總結一下，MySQL 中的鎖主要可以從「模式」與「粒度」兩個維度來分類：
 
-而在執行 Table Lock 前，要先確認 Table 中是否有 row lock，但總不能 full table scan 一筆筆檢查，因此有了 `Intention Lock`，該鎖只會跟 Table Lock 互卡，執行 `row lock` 會先對 Table 上 `Intention Lock`，`Intention Lock` 不會卡住 `row lock` 跟其他 `Intention Lock`，只卡 Table Lock，因此執行 Table Lock 時如果有其他 row lock，會被 Table 的 `Intention Lock` 卡住，不用 full table scan 檢查。
+### 1. 鎖的模式 (Lock Mode)
+這決定了「大家能不能一起讀」或「能不能改」。
+*   **Read Lock (讀鎖/共享鎖/S鎖)**：
+    *   語法：`SELECT ... LOCK IN SHARE MODE`
+    *   特性：大家可以一起讀 (Read Lock 之間相容)，但不能改 (跟 Write Lock 互斥)。
+*   **Write Lock (寫鎖/排他鎖/X鎖)**：
+    *   語法：`SELECT ... FOR UPDATE`, `UPDATE`, `DELETE`
+    *   特性：只有我可以讀寫，其他人通通排隊 (跟 Read Lock & Write Lock 都互斥)。
+
+### 2. 鎖的粒度 (Lock Granularity)
+這決定了「鎖的範圍有多大」。
+*   **Row Lock (行鎖)**：
+    *   只鎖住特定的那幾行資料 (如 `UPDATE products WHERE id=1`)。
+    *   併發度高，但在執行 Table Lock 時會造成判斷困難。
+*   **Table Lock (表鎖)**：
+    *   鎖住整張表 (如 `LOCK TABLE orders WRITE`)。
+    *   主要用於 DDL (改表結構) 或特殊維護操作。
+
+### 3. 意向鎖 (Intention Lock) 的角色
+*   **問題**：當有人想要對整張表上 **Table Lock** (例如改表結構) 時，他必須確保「這張表裡面沒有任何一行被上鎖」。如果沒有意向鎖，他必須全表掃描 (Full Table Scan) 檢查每一行，效率極差。
+*   **解法**：**Intention Lock** 就像是「在門口掛牌子」。
+    *   當 Transaction 要鎖某一行 (Row Lock) 時，必須先在表頭掛一個 **Intention Lock** (IS 或 IX)。
+    *   當有人要鎖整張表 (Table Lock) 時，只要看門口有沒有掛 **Intention Lock** (IS/IX) 的牌子就好，不用進去檢查每一行。
+    *   **特性**：Intention Lock 之間不會互斥 (多人可以同時掛牌子)，它只會跟 Table Lock 互斥。
 
 ## 資料什麼時候會被上鎖?
+基本上只有 `SELECT` 加上 `FOR UPDATE` / `LOCK IN SHARE MODE` 和 `DELETE` / `UPDATE` 等更新語法時會對資料上鎖，但**上鎖範圍**往往取決於是否命中索引。
 
-基本上只有 `SELECT` 加上 `FOR UPDATE & LOCK IN SHARE MODE` 和 `DELETE or UPDATE` 等更新語法時會對資料上鎖，但有時上鎖範圍與方式會讓你意想不到。
+### 1. 命中索引 vs 全表掃描
 
-假如 tasks Table 中有 10 筆待處理任務，執行 S`ELECT count(1) FROM tasks WHERE status = '待處理' FOR UPDATE` 時會只鎖那 10 筆嗎？
+假如 `tasks` 表中有 10 筆 `status = '待處理'` 的任務，執行：
+```sql
+SELECT count(1) FROM tasks WHERE status = '待處理' FOR UPDATE;
+```
+會只鎖那 10 筆嗎？答案是不一定：
 
-答案是不一定，如果 `status` 有 Index 那確實只會鎖 10 筆，但如果<span style="color: orange">**沒有 `status index` 就會 `Lock Table` 了**</span>，因為 MySQL 架構是 SQL Layer 跟 Storage Engine 分開，沒命中 index 時，要在 Storage Engine Full Table Scan 後交由 SQL Layer 過濾資料，而上鎖必須在 Storage Engine 完成。
+*   **有 Index (`status`)**：✅ 只鎖那 10 筆符合條件的 Row。
+*   **沒有 Index**：❌ <span style="color: red">**會鎖住整張表 (Lock Table)**</span>。
 
-Gap Lock 主要發生在範圍查詢 `WHERE id > 10 FOR UPDATE` or 查詢非 unique 索引 `WHERE status = 1 FOR UPDATE` ，但如果查詢條件沒有命中資料時 `WHERE id = 10 FOR UPDATE` ， id 是 `unique primary key`，但 `id = 10` 資料不存在，也有 `Gap Lock` 並會鎖住 `id=10` 前一筆跟後一筆資料的間隙，如果前一筆是 5 後一筆是 15 會鎖 5~15 範圍導致 `INSERT INTO t (id) VALUES (11)` 卡住。
+> [!WARNING]
+> **為什麼沒 Index 會鎖整張表？**
+> 因為 MySQL 架構分為 SQL Layer 與 Storage Engine。
+> 當沒命中 Index 時，Storage Engine 必須進行 **Full Table Scan**，而上鎖是在 Storage Engine 層完成的。它會將掃描到的**每一行都上鎖**，再交由 SQL Layer 過濾。雖然 SQL Layer 過濾後只剩 10 筆，但 Storage Engine 已經把整張表鎖死了。
 
-此外，`UPDATE & DELETE` 不存在資料，甚至 `INSERT ON DUPLICATE KEY UPDATE` 到不存在資料直接 `INSERT` 時也都會上 Gap Lock。
+### 2. Gap Lock (間隙鎖) 的觸發
+Gap Lock 主要是為了防止 Phantom Read (幻讀)，鎖住「不存在的間隙」。常見觸發情境：
 
-最後是 Isolation Level 如果設定成 Serializable，雖能解決上述所有一致性問題 (Dirty Read, Non-repeatable Read, Write Skew & Phantom Read)，但會自動把所有 `SELECT` 加上 `LOCK IN SHARE MODE` 的讀鎖。
+1.  **範圍查詢**：`WHERE id > 10 FOR UPDATE`。
+2.  **非 Unique 索引**：`WHERE status = 1 FOR UPDATE` (鎖住值與前後間隙)。
+3.  **查詢未命中 (Unique Key)**：
+    *   例如 `WHERE id = 10 FOR UPDATE` (資料不存在)。
+    *   即使 `id` 是 Unique Key，因為找不到資料，為了防止別人「趁機插入 `id=10`」，MySQL 會鎖住 `id=10` 所在的間隙。
+    *   **範例**：若 id 只有 5 和 15，查詢 id=10 會鎖住 `(5, 15)`，導致 `INSERT VALUES (11)` 也被卡住。
+
+此外，`UPDATE` / `DELETE` 針對不存在的資料，或是 `INSERT ... ON DUPLICATE KEY UPDATE` 發生衝突時，也都會觸發 Gap Lock。
+
+### 3. Isolation Level 影響
+如果 Isolation Level 設定為 **Serializable**：
+*   雖能解決所有一致性問題 (Dirty Read, Phantom Read 等)。
+*   但代價是自動把**所有** `SELECT` 都加上 `LOCK IN SHARE MODE` (讀鎖)，嚴重影響併發效能。
 
 ## MySQL 如何避免 DeadLock
 
@@ -246,57 +318,163 @@ Gap Lock 主要發生在範圍查詢 `WHERE id > 10 FOR UPDATE` or 查詢非 uni
 ```sql
 -- transaction A:
 BEGIN
-SELECT * FROM users WHERE id = 1 FOR UPDATE;  
-SELECT * FROM users WHERE id = 2 FOR UPDATE;  
-...  
+  SELECT * FROM users WHERE id = 1 FOR UPDATE;  
+  SELECT * FROM users WHERE id = 2 FOR UPDATE;  
+  ...  
 COMMIT;  
   
 -- transaction B:  
 BEGIN
-SELECT * FROM users WHERE id = 2 FOR UPDATE;  
-SELECT * FROM users WHERE id = 1 FOR UPDATE;  
-...  
+  SELECT * FROM users WHERE id = 2 FOR UPDATE;  
+  SELECT * FROM users WHERE id = 1 FOR UPDATE;  
+  ...  
 COMMIT;
 ```
 
-當 A & B Transaction 同時執行，A 持有 `users id=1` 資源並等待獲取 `users id=2` 資源，而 B 持有 `users id=2` 資源並等待 `users id=1` ，雙方互相等待對方釋放資源，造成 DeadLock。
+當 A & B Transaction 同時執行：
+- A 持有 `users id = 1` 資源並等待獲取 `users id = 2` 資源，
+- B 持有 `users id = 2` 資源並等待 `users id = 1` 資源
+- <span style="color: red">雙方互相等待對方釋放資源，造成 **DeadLock**。</span>
 
 該 DeadLock 解法很簡單，將 Lock 順序改成一致就可以了：
 
 ```sql
 -- transaction A:  
 BEGIN
-SELECT * FROM users WHERE id = 1 FOR UPDATE;  
-SELECT * FROM users WHERE id = 2 FOR UPDATE;  
-...  
+  SELECT * FROM users WHERE id = 1 FOR UPDATE;
+  SELECT * FROM users WHERE id = 2 FOR UPDATE;
+  ...  
 COMMIT;  
   
 -- transaction B:  
 BEGIN
-SELECT * FROM users WHERE id = 1 FOR UPDATE;  
-SELECT * FROM users WHERE id = 2 FOR UPDATE;  
-...  
+  SELECT * FROM users WHERE id = 1 FOR UPDATE;  
+  SELECT * FROM users WHERE id = 2 FOR UPDATE;  
+  ...  
 COMMIT;
 ```
 
-又或者可改成 `SELECT * FROM users WHERE id IN (1, 2) FOR UPDATE;` 
+又或者可改成 
+```sql
+SELECT * FROM users WHERE id IN (1, 2) FOR UPDATE;
+```
 
-但當：
+> [!TIP]
+> **為什麼改成 `IN` 可以避免 DeadLock？**
+> 
+> 這是因為 MySQL 在處理 `IN (...)` 鎖定時，是由 **Index Scan 的順序**來決定上鎖順序，而不是依照 SQL 語法中參數的順序。
+> 
+> 也就是說，無論寫 `IN (1, 2)` 或 `IN (2, 1)`，InnoDB 都會依照 Index 的順序（例如 1 -> 2）依序上鎖。
+> 當所有 Transaction 都遵循相同的上鎖順序（Ordered Locking），DeadLock 自然就消失了。
 
-`SELECT * FROM users WHERE id IN (1, 2) FOT UPDATE;` 以及
-`SELECT * FROM users WHERE id IN (2, 1) FOT UPDATE;` 同時執行會 DeadLock 嗎？ `IN` 裡面的參數順序不同會導致 Lock 順序不一致嗎？
+但當同時執行以下兩個 SQL 時，會 DeadLock 嗎？ `IN` 裡面的參數順序不同會導致 Lock 順序不一致嗎？ 
+- `SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;` 
+- `SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;` 
 
-## 我們如何知道執行中 SQL 是怎麼上鎖的
+答案是不會 DeadLock，因為 MySQL 會依照 Index 的順序來決定上鎖順序。
+
+
+> [!NOTE]
+> **為什麼 `IN` 不會 DeadLock？** 這個是跟 MySQL Lock 的 Index Tree Scan 的執行順序有關。
+> 
+> InnoDB 會依照 Index 的順序（例如 1 -> 2 -> 3）依序上鎖。因此兩者鎖定順序一致，不會發生 DeadLock。
+
+
+當執行以下兩個 Transaction 時
+```sql
+-- Transaction A
+BEGIN;  
+SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;  
+...  
+COMMIT;
+
+-- Transaction B
+BEGIN;  
+SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;  
+...
+COMMIT
+```
+
+得到結果如下圖，可以看到 Transaction A `id = (1,2,3)` 有上鎖成功，實際執行是拿到 Transaction B `id = 1` 的鎖卡住，由此可見上鎖順序跟 SQL 寫法無關。
+理論上，如果上鎖順序是相反，會拿到 Transaction B `id = 3` 的鎖並卡住。
+
+![alt text](imgs/image-3.png)
+
+* **Row 4, 5, 6**
+  - 屬於 **Transaction A**。狀態為 `GRANTED`（已獲得）。
+  - 表示 Transaction A 已經成功取得了 id = 1, 2, 3 的 **排他鎖 (X Lock)**。這是造成資源佔用、導致 Transaction B 被阻塞的主因。
+* **Row 2**
+  - 屬於 **Transaction B**。狀態為 `WAITING`（等待中），鎖定資料為 `1`。
+  - 這證實了 InnoDB 內部的加鎖機制：對於 `IN (...)` 類型的查詢，資料庫會依照 **索引順序**（由小到大 1 → 2 → 3）進行加鎖，而非 SQL 語句中的順序（3, 2, 1）。Transaction B 在嘗試鎖定排序後的第一筆資料 `id = 1` 時，發現已被 Row 4 (Transaction A) 佔用，因此卡在第一步。
+* **Row 1, 3**
+  - 分別屬於 **Transaction A 與 B**。類型為 **表級意向鎖 (IX, Intention Exclusive)**。狀態皆為 `GRANTED`。
+這是事務進入表進行行鎖操作前的「入場券」。這兩個鎖表示 A 和 B 都「有意圖」修改表內資料。因為意向鎖之間互不衝突（大家都可以進大門），所以狀態都是成功獲得，它們只會擋住想要鎖死整張表的操作（如 `LOCK TABLES`）。
+
+
+
+> [!NOTE]
+> 上鎖順序取決於 **Index Tree Scan 的順序**。
+> 而影響 Index Tree Scan 順序的主要因素有兩個：
+> 1. SQL 語法中的 `ORDER BY` (ASC / DESC)。
+> 2. 建立 Index 時定義的順序 (ASC / DESC)。
+> 
+> ### Order By
+>id 的 Index 順序是 $1 \rightarrow 2 \rightarrow 3$ ，上鎖順序同樣會是 $1 \rightarrow 2 \rightarrow 3$，但如果第二個 SQL 加上 `ORDER BY` 上鎖順序就會相反了，會拿到 id=3 的鎖並卡住。
+> 
+> ```sql
+> BEGIN;
+>   SELECT * FROM users WHERE id IN (1, 2, 3) ORDER BY id DESC FOR UPDATE;
+> COMMIT;
+> ``` 
+>
+> ### 建立 Index 時定義的順序 (ASC / DESC)。
+> 如果將所有 `index` 改成 `unique`，並將 `nick_name` index 順序設定成 `DESC`，
+> 
+> ```sql
+> CREATE TABLE users (  
+> 	id int auto_increment,  
+> 	name varchar(100),  
+> 	gender int,  
+> 	nick_name varchar(100),  
+> 	unique key (name),  
+> 	unique key (nick_name DESC),  
+> 	primary key (id)  
+> );
+>
+> INSERT INTO users (id, name, nick_name, gender) VALUES
+>  (1, 'apple', 'apple', 0),(2, 'banana', 'banana', 1);
+>
+> -- Transaction A：使用 name Index (預設 ASC) 
+> BEGIN;  
+> SELECT * FROM users WHERE name IN ('apple', 'banana') FOR UPDATE;  
+> ....  
+> COMMIT;
+>
+> -- Transaction B：使用 nick_name Index (預設 DESC) 
+> BEGIN;  
+> SELECT * FROM users WHERE nick_name IN ('apple', 'banana') FOR UPDATE;  
+> ....
+> COMMIT;
+> ```
+>
+> 此時查詢 Lock 狀態會發現，由於 Transaction B 的 `nick_name` Index 是 `Desc`，所以會從 id = 2 (banana) 的資料開始上鎖，跟 Transaction A 的 `name` Index 順序相反，導致上面 SQL 看起來順序一致，但同時執行時卻造成了 DeadLock。
+> - T1 (Transaction A) 搶到了 name='apple' 的鎖。
+> - T2 (Transaction B) 搶到了 nick_name='banana' 的鎖。
+> - T1 想要鎖 nick_name='banana'，但發現被 T2 鎖住了，開始等待。
+> - T2 想要鎖 name='apple'，但發現被 T1 鎖住了，開始等待。
+> - <span style="color:red">Deadlock</span>: MySQL 偵測到互相等待，強制 rollback 其中一個。
+
+## 如何知道執行中 SQL 是怎麼上鎖的
 
 `performance_schema` DB 中 `data_locks` table 可用來看當前所有 Lock 詳細狀況，該 Table Schema 為：
 
-![Screenshot 2026-01-05 at 22.26.47](https://hackmd.io/_uploads/SkAb5HYEWl.png)
+![alt text](imgs/image-5.png)
 
-例如：
+**Example:**
 
 ```sql
 -- 建立一個 users table 有唯一主鍵 id 以及非唯一 index name  
-create table users (  
+CREATE TABLE users (  
 	id int auto_increment,  
 	name varchar(100),  
 	gender int,  
@@ -305,45 +483,63 @@ create table users (
 );  
   
 -- 建立三筆資料  
-insert into users (id, name, gender) values  
+INSERT INTO users (id, name, gender) VALUES  
 (1, 'apple', 0),(2, 'banana',1),(3, 'apple',1);  
   
 -- 對 id = 1 唯一索引資料上鎖  
-begin;  
-select * from users where id = 1 for update;  
+BEGIN;  
+SELECT * FROM users WHERE id = 1 FOR UPDATE;  
 ....  
+-- COMMIT; -- 先不 COMMIT
 ```
 
-在 transaction 不 commit 情況下執行 `select * from  performance_schema.data_locks;` 可看到：
+在 Transaction 不 COMMIT 時，執行以下 SQL 可以看到 Lock 狀態：
 
-![Screenshot 2026-01-05 at 22.28.15](https://hackmd.io/_uploads/BJIFcHt4Ze.png)
-![Screenshot 2026-01-05 at 22.28.23](https://hackmd.io/_uploads/ryRtqBYEZg.png)
+```sql
+SELECT * FROM performance_schema.data_locks;
+```
 
-分別有兩個 Lock：
- 1. **Intention Lock**: 第一個是 Table Lock 且 Lock Mode IX 代表 Intention Exclusive Lock。
- 2. **Row Lock**: 第二個是使用 PRIMARY Index 的 Record Lock 其 Lock Mode 為 **X,REC_NOT_GAP**，X 代表 Exclusive Lock 而 REC_NOT_GAP 代表不是 Gap Lock 只鎖單一 Record 不影響 `INSERT` 行為，最後 LOCK_DATA 代表被鎖住的 Index 資料，也就是 `id=1` 的資料。
+可以看到分別有兩筆 Lock：
+1. **Intention Lock**: 第一行是 Lock Type 為 Table 且 Lock Mode 為 `(IX)` 的意向排他鎖 (Intention Exclusive Lock)。
+2. **Row Lock**: 第二行是
+   - Lock Type 為 Record
+   - Lock Index 為 PRIMARY
+   - Lock Mode 為 **X,REC_NOT_GAP**
+     - X 代表排他鎖 (Exclusive Lock)
+     - REC_NOT_GAP 代表不是 Gap Lock 只鎖單一 Record 不影響 `INSERT` 行為
+   - LOCK_DATA 代表被鎖住的 Index 資料，也就是 `id=1` 的資料。
+
+![alt text](imgs/image-4.png)
+
+
+
+
 
 接下來：
 
 ```sql
 -- 對 name = 'apple' 非唯一索引資料上鎖  
 BEGIN;  
-select * from users where name = 'apple' for update;  
+SELECT * FROM users WHERE name = 'apple' FOR UPDATE;  
 ...
 ```
 
-執行 `select * from performance_schema.data_locks;` 可看到：
+執行 `SELECT * FROM performance_schema.data_locks;` 可看到：
 
 ![Screenshot 2026-01-05 at 22.42.59](https://hackmd.io/_uploads/r1dkCBtNWg.png)
 
 出現四個 Lock：
 
 1. **Intention Lock** : TABLE 的 Intention Lock 。
-2. **name Index Lock** : 使用 name Index 對兩筆 name=apple 資料上 3. **Exclusive Record Lock**，但因為是非唯一索引，會上 Gap Lock 所以沒有 **REC_NOT_GAP**
-3. **PRIMARKY Lock** : 同時也需要對 PRIMARY Index id=1 & id=3 上 Exclusive Record Lock，但 PRIMARY 是唯一索引沒有 Gap Lock 所以有 **REC_NOT_GAP**
+2. **Name Index Lock** : 使用 Name Index 對兩筆 name=apple 資料上
+   - Lock Type 為 Record
+   - Lock Index 為 name
+   - Lock Mode 為 **X,REC_NOT_GAP**
+   - LOCK_DATA 代表被鎖住的 Index 資料，也就是 `name='apple'` 的資料。
+3. **PRIMARY Index Lock** : 同時也需要對 PRIMARY Index id=1 & id=3 上 Exclusive Record Lock，但 PRIMARY 是唯一索引沒有 Gap Lock 所以有 **REC_NOT_GAP**
 4. **Gap Lock** : 最後會在 `name` Index 上一個 Exclusive Gap Lock，由於 name 排序是 apple => banana，所以 Gap Lock 會鎖住這段 [apple, banana] (包含 apple，不包含 banana) 範圍的 `insert` 行為
 
-隨後執行，`INSERT INTO users (name) VALUES ('apple'), ('apple2')` 在 [apple, banana] 範圍 Insert 資料，卡住後會發現 Lock 多了兩個：
+隨後執行，`INSERT INTO users (name) VALUES ('apple'), ('apple2')` 在 `[apple, banana]` 範圍 Insert 資料，卡住後會發現 Lock 多了兩個：
 
 ![Screenshot 2026-01-05 at 23.06.08](https://hackmd.io/_uploads/BJCEmUFVbe.png)
 
@@ -356,143 +552,191 @@ select * from users where name = 'apple' for update;
 
 supremum pseudo-record 代表向上無限衍生且不存在的紀錄 ，對該紀錄上 Exclusive Lock 會導致 INSERT 資料若排序在 banana 後面都會卡住 (e.g INSERT INTO users (name) VALUES ('dog'), ('cat') )。
 
-總結幾個常見的 Lock Mode
-
-- X : Exclusive Lock 也就是 Write Lock
-- S : Shared Lock 也就是 Read Lock
-- I : Table Intention Lock
-- REC_NOT_GAP : 只鎖單筆資料，不鎖範圍
-- GAP : 不鎖單筆資料，鎖一個範圍不能 Insert 新資料
-- INSERT_INTENTION : 代表 Insert 正在等其他 Gap Lock 釋放
-- X 搭配 supremum pseudo-record : 對無限延伸的範圍上 Gap Lock
-
-## MySQL Lock 的執行順序
-
-當執行
-
-```sql
-BEGIN;  
-SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;  
-...  
-```
-
-上圖，可看到 id (1,2,3) 都有上鎖成功，然後執行
-
-```sql
-BEGIN;  
-SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;  
-...
-```
-
-理論上，如果上鎖順序是相反，會拿到 `id=3` 的鎖並卡住，但實際上如下圖所示，實際執行是拿到 `id=1` 的鎖卡住，由此可見上鎖順序跟 SQL 寫法無關。
-
-![Screenshot 2026-01-06 at 18.32.05](https://hackmd.io/_uploads/BJKoNwqNZx.png)
-
-## 上鎖順序跟什麼有關?
-
-跟 <span style="color: orange">**Index Tree Scan 順序**</span>有關，id 的 Index 順序是 1->2->3 ，上鎖順序同樣會是 1->2->3，但如果第二個 SQL 加上 `ORDER BY` 上鎖順序就會相反了：
-
-```sql
-BEGIN
-SELECT * FROM users WHERE id (1, 2, 3) ORDER BY id DESC FOR UPDTE;
-```
-
-如上圖，會拿到 id=3 的鎖並卡住。
-
-除了 `ORDER BY` 會影響上鎖順序外，建立 Index 時使用逆序設定也會影響：
-
-
-### 將所有 index 改成 unique，並將 nick_name index 順序設定成 
-```sql
-DESC  
-create table users (  
-	id int auto_increment,  
-	name varchar(100),  
-	gender int,  
-	nick_name varchar(100),  
-	unique key (name),  
-	unique key (nick_name DESC),  
-	primary key (id)  
-);
-
-insert into users (id, name, nick_name, gender) values
- (1, 'apple', 'apple', 0),(2, 'banana', 'banana', 1);
- 
-begin;  
-select * from users where name IN ('apple', 'banana') for update;  
-....  
-  
-begin;  
-select * from users where nick_name IN ('apple', 'banana') for update;  
-....
-```
-
-此時查詢 Lock 狀態會發現 (上圖)，由於 `nick_name` Index 是 `Desc`，所以會從 id=2 的資料開始上鎖，跟 `name` Index 順序相反，導致上面 SQL 看起來順序一致，但同時執行時卻造成了 DeadLock。
+> [!NOTE]
+> ### 總結幾個常見的 Lock Mode
+>
+> | Lock Mode | 說明 |
+> | :--- | :--- |
+> | **X** | **Exclusive Lock**，也就是 Write Lock (寫鎖)。 |
+> | **S** | **Shared Lock**，也就是 Read Lock (讀鎖)。 |
+> | **I** | **Table Intention Lock**，表級意向鎖。 |
+> | **REC_NOT_GAP** | 只鎖單筆資料，不鎖範圍 (Record Lock)。 |
+> | **GAP** | 不鎖單筆資料，鎖一個範圍不能 Insert 新資料 (Gap Lock)。 |
+> | **INSERT_INTENTION** | 代表 Insert 正在等其他 Gap Lock 釋放。 |
+> | **X 搭配 supremum** | 對無限延伸的範圍上 Gap Lock。 |
 
 ## 除了順序情境外，還有什麼會造成 DeadLock 的情境嗎？
 
-在併發寫入情境中，更新順序若相反也會造成 DeadLock，但其實寫入更常見的 DeadLock 是 Gap Lock，例如：
+除了上述的「互斥鎖順序不一致」外，**併發 Upsert (Insert/Update)** 是另一個極常見的 DeadLock 來源。這類問題的核心原因在於 **Gap Lock**。
+
+### 情境一：先 UPDATE 後 INSERT (Application-Level Upsert)
+
+許多程式邏輯會這樣寫：先嘗試更新，如果更新不到（代表資料不存在），則執行新增。
 
 ```sql
--- transaction A  
-begin;  
-UPDATE users SET gender=0 WHERE id = 1;  
-if users not found:  
-	INSERT INTO users (gender, id) VALUES (0 , 1);  
-  
--- transaction B  
-begin;  
-UPDATE users SET gender=1 WHERE id = 2;  
-if users not found:  
-	INSERT INTO users (gender, id) VALUES (0 , 2);
+-- transaction 1
+BEGIN;
+UPDATE users SET gender=0 WHERE id = 1;
+-- 影響 row 數為 0 (資料不存在)，但獲得了 Gap Lock
+...
+-- 準備 INSERT
+if users not found:
+    INSERT INTO users (gender, id) VALUES (0 , 1);
+COMMIT;
 ```
 
-當兩個 Transaction 都 UPDATE 不存在資料時，都會上 Gap Lock 且因為 users 表沒資料，範圍就是 (無限小, 無限大)，此時 A & B Transaction 在執行 INSERT 時就會被對方的 Gap Lock 卡住變成 DeadLock。
-
-另外就是加上面 SQL 精簡成 INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0; ，如果 UPDATE 不存在的值會上 Gap Lock 並 INSERT ，此時若多個 Transaction 執行：
+如果此時 Transaction B 也做一樣的事（針對 `id=2`）：
 
 ```sql
--- transaction A  
-INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0;  
-  
--- transaction B  
-INSERT INTO users (id, gender) VALUES (2, 0) ON DUPLICATE KEY UPDATE gender=1;  
-  
--- transaction C  
+-- transaction 2
+BEGIN;
+UPDATE users SET gender=1 WHERE id = 2;
+-- 影響 row 數為 0 (資料不存在)，但也獲得了 Gap Lock
+...
+-- 準備 INSERT
+if users not found:
+    INSERT INTO users (gender, id) VALUES (0 , 2);
+COMMIT;
+```
+
+**DeadLock 分析**：
+1. **Gap Lock 獲取**：
+   - 當 `UPDATE` 不存在的資料時，InnoDB 會獲取該範圍的 **Gap Lock**。
+   - 假設 `users` 表目前是空的，`id=1` 和 `id=2` 都落在 `(-∞, +∞)` 的 Gap 範圍內。
+   - <span style="color: orange">**Gap Lock 之間是相容的**</span>，所以 T1 和 T2 都可以同時獲得 Gap Lock。
+2. **INSERT 衝突**：
+   - 當 T1 執行 `INSERT` 時，需要獲取 **Insert Intention Lock**（插入意向鎖）。
+   - <span style="color: red">**Insert Intention Lock 與 Gap Lock 是互斥的**</span>。
+   - T1 為了 Insert 想要獲取鎖，但發現 T2 持有 Gap Lock，所以 T1 等待 T2 釋放。
+   - T2 為了 Insert 想要獲取鎖，但發現 T1 持有 Gap Lock，所以 T2 等待 T1 釋放。
+   - **結果**：互相等待，**DeadLock**。
+
+---
+
+### 情境二：INSERT ... ON DUPLICATE KEY UPDATE
+
+即使使用 MySQL 原生的 Upsert 語法，在高度併發下仍可能遭遇 DeadLock。
+
+```sql
+INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0;
+```
+
+當三個 Transaction 同時執行時：
+
+```sql
+-- T1
+INSERT INTO users (id, gender) VALUES (1, 0) ON DUPLICATE KEY UPDATE gender=0;
+
+-- T2
+INSERT INTO users (id, gender) VALUES (2, 0) ON DUPLICATE KEY UPDATE gender=1;
+
+-- T3
 INSERT INTO users (id, gender) VALUES (3, 0) ON DUPLICATE KEY UPDATE gender=0;
 ```
 
-1. `transaction A` 獲取 Gap Lock 並進入 `insert`
-2. `transaction B & C` 同時獲取 Gap Lock ，並等待 t`ransaction A insert`  行為結束，才能 `insert`
-3. `transaction A commit` 釋放 Gap Lock ，但由於 `transaction B & C` 都獲取了 Gap Lock，當他們兩繼續執行 `insert` 行為時，會被彼此的 Gap Lock 卡住，導致 DeadLock
+**DeadLock 分析**：
+1. **T1 獲取鎖**：T1 成功執行，並獲取了相關的 Gap Lock（若發生 Unique Key 衝突檢查）。
+2. **T2 & T3 等待**：T2 和 T3 嘗試執行，同時獲取了 Gap Lock（Gap Lock 可共存），並等待 T1 完成（因為要確認 Unique Constraint）。
+3. **T1 Commit & 釋放鎖**：T1 結束，釋放 Gap Lock。
+4. **互卡**：
+   - T2 想要真正的 `INSERT`，需要獲取 Insert Intention Lock，但發現 T3 持有 Gap Lock -> **等待 T3**。
+   - T3 想要真正的 `INSERT`，需要獲取 Insert Intention Lock，但發現 T2 持有 Gap Lock -> **等待 T2**。
+   - **結果**：T2 與 T3 互卡，**DeadLock**。
 
-**要解決上述 DeadLock 問題很簡單，就是先執行 INSERT ，出現 ON DUPLICATE KEY ERROR 在執行 UPDATE ，若想避免頻繁出現 ON DUPLICATE KEY ERROR，可用 in memory cache 紀錄一個 flag。**
+### ✅ 最佳解決方案
 
-## Foreign Key 造成的 DeadLock 案例：
+要解決上述「Gap Lock 互卡」造成的 DeadLock，建議調整邏輯：
 
-`customers` 跟 `orders` 是一對多關係，`orders` 表中有 `customer_id` 欄位關聯到 `customers` 表的 `id`。
+**「先 INSERT，失敗後再 UPDATE」**
 
-執行 `INSERT INTO orders (customer_id) VALUES (123);` 時，為確保 customers.id=123 這筆資料存在， MySQL 會對 customers id=123 這筆資料上讀鎖，因此如果執行：
-
-```sql
--- transaction A  
-BEGIN:
-INSERT INTO orders (id, customer_id) VALUES (1, 123);
-UPDATE customers SET count=count+1 WHERE id = 123;
-
--- transaction B
-BEGIN;
-INSERT INTO orders (id, customer_id) VALUES (2, 123);
-UPDATE customers SET count=count+1 WHERE id = 123;
+```python
+try:
+    # 1. 先嘗試 INSERT
+    cursor.execute("INSERT INTO users (id, gender) VALUES (1, 0)")
+except IntegrityError:
+    # 2. 若發生 Duplicate Key Error，再執行 UPDATE
+    cursor.execute("UPDATE users SET gender=0 WHERE id = 1")
 ```
 
-Transaction A & B 同時執行，A & B 同時 INSERT orders 成功並對 customers 上讀鎖，隨後 A & B 執行 `UPDATE customers` 時就會被彼此的讀鎖卡住，造成 DeadLock。
+雖然這樣可能會產生較多的 Error Log，但能有效避免 Gap Lock 造成的 DeadLock。若想避免頻繁出現 Error，可用 Redis 等 In-Memory Cache 紀錄一個 flag 來初步過濾。
+
+## Foreign Key 造成的 DeadLock
+
+這是一個非常經典但容易被忽略的 DeadLock 案例，發生在 **Parent-Child Table (主從表)** 關係中。
+
+假設資料結構：
+- `customers` (主表)：`id` 為 PK。
+- `orders` (子表)：`customer_id` 為 FK，關聯到 `customers.id`。
+
+### 問題情境
+
+當我們在 `orders` 表插入資料時，MySQL 必須確保 `customers` 表中對應的 `id` 是存在的。為了保證這個約束條件在 Transaction 期間不變（防止 parent row 被刪除），MySQL 會對 `customers` 表的該行資料加上 **Shared Lock (S 鎖)**。
+
+如果業務邏輯是：「插入訂單 -> 更新客戶統計資訊」，就容易發生互斥。
+
+```sql
+-- Transaction A
+BEGIN;
+-- 1. 插入訂單 (會自動對 customers id=123 加 S 鎖)
+INSERT INTO orders (id, customer_id) VALUES (1, 123);
+
+-- 2. 更新客戶 (嘗試對 customers id=123 加 X 鎖)
+UPDATE customers SET order_count = order_count + 1 WHERE id = 123;
+COMMIT;
+```
+
+如果 Transaction B 同時執行類似操作：
+
+```sql
+-- Transaction B
+BEGIN;
+INSERT INTO orders (id, customer_id) VALUES (2, 123);
+UPDATE customers SET order_count = order_count + 1 WHERE id = 123;
+COMMIT;
+```
+
+### DeadLock 分析
+
+1. **獲取 S 鎖 (Insert FK Check)**：
+   - **T1** 執行 `INSERT orders`: 成功，持有 `customers(id=123)` 的 **S Lock**。
+   - **T2** 執行 `INSERT orders`: 成功，持有 `customers(id=123)` 的 **S Lock** (S 鎖可相容)。
+
+2. **升級 X 鎖 (Deadlock 發生)**：
+   - **T1** 執行 `UPDATE customers`: 需要將 S 鎖升級為 **X Lock**。
+     - ❌ **失敗**：因為 T2 持有 S 鎖，T1 必須等待 T2 釋放。
+   - **T2** 執行 `UPDATE customers`: 需要將 S 鎖升級為 **X Lock**。
+     - ❌ **失敗**：因為 T1 持有 S 鎖，T2 必須等待 T1 釋放。
+
+3. **結果**：T1 等 T2，T2 等 T1 -> **DeadLock**。
+
+### ✅ 解決方案
+
+解決此問題的關鍵在於**避免「持有 S 鎖後再請求 X 鎖」的升級過程**，或者**統一上鎖順序**。
+
+**改法：先 UPDATE Parent (先拿 X 鎖)，再 INSERT Child**
+
+```sql
+BEGIN;
+-- 1. 先更新 customers (直接獲取 X 鎖)
+UPDATE customers SET order_count = order_count + 1 WHERE id = 123;
+
+-- 2. 再插入 orders (FK 檢查時需要 S 鎖，因為已持有 X 鎖，自己相容自己)
+INSERT INTO orders (id, customer_id) VALUES (1, 123);
+COMMIT;
+```
+
+這樣修改後，T1 會先獲得 `customers` 的 X 鎖，T2 在第一步就會被擋住等待，直到 T1 完成。雖然併發度稍微降低（變序列化），但徹底解決了 DeadLock 風險。
 
 ## 發生 DeadLock 時，MySQL 會怎麼處理？
 
 MySQL 有 `DeadLock Detection` 的功能，會主動偵測 DeadLock 並 Rollback 其中一個 Transaction，讓另一個 Transaction 順利執行，可透過設定 <span style="color: orange">`innodb_lock_wait_timeout`</span> 參數調整 Transaction 卡住的時間，如果 Transaction 卡住時間超過該參數就會被強制 Rollback。
 
-MySQL 還會紀錄最後一次 DeadLock 的詳細資訊，可以透過執行 `SHOW ENGINE INNODB STATUS` 指令獲取 InnoDB 的詳細資訊，其中 `LATEST DETECTED DEADLOCK Section` 為會紀錄最後兩個造成 DeadLock 的 Transaction 資訊：
+MySQL 還會紀錄最後一次 DeadLock 的詳細資訊，可以透過執行 
+```sql
+SHOW ENGINE INNODB STATUS
+``` 
+
+指令獲取 InnoDB 的詳細資訊，其中 `LATEST DETECTED DEADLOCK` Section 為會紀錄最後兩個造成 DeadLock 的 Transaction 資訊：
 
 ```sql
 ------------------------  
@@ -563,34 +807,57 @@ Record lock, heap no 259 PHYSICAL RECORD: n_fields 7; compact format; info bits 
 *** WE ROLL BACK TRANSACTION (2)
 ```
 
-以上面的資訊為例，我們來試著分析 DeadLock 的解法：
+讓我們以上述日誌為例，逐步分析 DeadLock 的成因與解法：
 
-1. 首先 SQL 執行語法為：(1) Transaction 為 update `products` set `sold` = 32 where `id` = 919 (2) Transaction 為 update `products` set `sold` = 34 where `id` = 919
-2. 分析 Transaction 1 Lock 狀況：
-    - (1) HOLDS THE LOCK(S) 顯示為 lock mode S locks rec but not gap 代表 Transaction 1 有拿到該資料的讀鎖權限
-    - (1) WAITING FOR THIS LOCK TO BE GRANTED 顯示 lock_mode X locks rec but not gap waiting 代表 Transaction 1 在等待寫鎖權限，且不是因為 Gap Lock 被卡住。
-3. 分析 Transaction 2 Lock 狀況：
-    - (2) HOLDS THE LOCK(S) 和 (2) WAITING FOR THIS LOCK TO BE GRANTED 的資訊顯示跟 Transaction 1 狀況一樣。
+### 1. 讀懂 DeadLock 日誌
 
-透過上面資訊可以推導，這兩個 Transaction 都拿到了讀鎖，並往下執行 `UPDATE` 獲取寫鎖時互相卡住了，所以完整的 Transaction 應該長這樣：
+我們關注 `*** (1) TRANSACTION` 與 `*** (2) TRANSACTION` 的關鍵資訊：
+
+*   **Transaction 1 (Rx1)**:
+    *   **正在執行**: `UPDATE products SET sold = 32 WHERE id = 919`
+    *   **持有鎖**: `lock mode S locks rec but not gap`（已獲得 `id=919` 的 **Shared Lock**）
+    *   **等待鎖**: `lock_mode X locks rec but not gap waiting`（正在等待 `id=919` 的 **Exclusive Lock**）
+
+*   **Transaction 2 (Rx2)**:
+    *   **正在執行**: `UPDATE products SET sold = 34 WHERE id = 919`
+    *   **持有鎖**: `lock mode S locks rec but not gap`（已獲得 `id=919` 的 **Shared Lock**）
+    *   **等待鎖**: `lock_mode X locks rec but not gap waiting`（正在等待 `id=919` 的 **Exclusive Lock**）
+
+### 2. 還原案發經過
+
+透過上述「持有 S 鎖，等待 X 鎖」的特徵，我們可以推導出這兩個 Transaction 的邏輯大致如下（經典的 `SELECT ... LOCK IN SHARE MODE` 後接 `UPDATE`）：
 
 ```sql
--- Transaction 1  
-begin;  
-SELECT id, sold FROM products WHERE id = 919 LOCK IN SHARE MODE;  
-...  
-UPDATE products SET sold = 32 WHERE id = 919  
-commit;  
-  
--- Transaction 2  
-begin;  
-SELECT id, sold FROM products WHERE id = 919 LOCK IN SHARE MODE;  
-...  
-UPDATE products SET sold = 34 WHERE id = 919  
-commit;
+-- Transaction 1
+BEGIN;
+SELECT * FROM products WHERE id = 919 LOCK IN SHARE MODE; -- 獲得 S 鎖
+-- (... 業務邏輯處理 ...)
+UPDATE products SET sold = 32 WHERE id = 919; -- 嘗試升級為 X 鎖 -> 等待 T2 釋放 S 鎖
+COMMIT;
+
+-- Transaction 2
+BEGIN;
+SELECT * FROM products WHERE id = 919 LOCK IN SHARE MODE; -- 獲得 S 鎖 (與 T1 的 S 鎖相容)
+-- (... 業務邏輯處理 ...)
+UPDATE products SET sold = 34 WHERE id = 919; -- 嘗試升級為 X 鎖 -> 等待 T1 釋放 S 鎖 -> DeadLock 💥
+COMMIT;
 ```
 
-邏輯看起來是同時賣出相同產品，該情況有兩種解法：
+### 3. 如何解決？
 
-1. 將 `LOCK IN SHARE MODE` 改成 `FOR UPDATE` 確保先拿讀鎖，誰先拿到先執行 `UPDATE`
-2. 移除 `SELECT` 語法，使用 `UPDATE products SET sold = sold + ? WHERE id = 919 AND sold >= ?` 效能較好
+這類「S 鎖升級 X 鎖」造成的 DeadLock，通常有兩種解法：
+
+#### 方法 A：一開始就拿寫鎖 (推薦)
+不要使用 `LOCK IN SHARE MODE`，改用 `FOR UPDATE`。這樣 T1 在讀取時就會直接拿 X 鎖，T2 就會乖乖在 `SELECT` 階段等待，不會進入「互咬」狀態。
+
+```sql
+SELECT * FROM products WHERE id = 919 FOR UPDATE;
+```
+
+#### 方法 B：原子化更新 (Atomic Update)
+如果業務邏輯允許，直接使用 SQL 進行運算，完全不需要先 `SELECT` 出來。這樣效能最好，因為減少了來回傳輸與鎖的持有時間。
+
+```sql
+-- 直接更新，原子操作
+UPDATE products SET sold = sold + 1 WHERE id = 919;
+```
