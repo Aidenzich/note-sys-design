@@ -144,8 +144,8 @@ MySQL 使用 <span style="color: orange">**Gap Lock (間隙鎖)**</span> 來解�
 
 1.  **鎖定範圍**：
     當執行 `SELECT * FROM orders WHERE id BETWEEN 1 AND 10 FOR UPDATE` 時：
-    *   除了對存在的 `id=1, 3, 5` 上 **Row Lock**。
-    *   還會對 `(1, 3)`, `(3, 5)`, `(5, 10]` 這些區間上 **Gap Lock**。
+    *   除了對存在的 `id=2, 3, 5` 上 **Row Lock**。
+    *   還會對 `(-∞, 2]`, `(2, 3)`, `(3, 5)`, `(5, 10]` 這些區間上 **Gap Lock**。
     *   結果：任何想要 `INSERT` 到這些範圍的動作（例如 `id=2` 或 `id=4`）都會被阻擋，從而消滅了幻讀。
 
 2.  **Next-Key Lock**：
@@ -374,11 +374,6 @@ SELECT * FROM users WHERE id IN (1, 2) FOR UPDATE;
 答案是不會 DeadLock，因為 MySQL 會依照 Index 的順序來決定上鎖順序。
 
 
-> [!NOTE]
-> **為什麼 `IN` 不會 DeadLock？** 這個是跟 MySQL Lock 的 Index Tree Scan 的執行順序有關。
-> 
-> InnoDB 會依照 Index 的順序（例如 1 -> 2 -> 3）依序上鎖。因此兩者鎖定順序一致，不會發生 DeadLock。
-
 
 當執行以下兩個 Transaction 時
 ```sql
@@ -386,13 +381,16 @@ SELECT * FROM users WHERE id IN (1, 2) FOR UPDATE;
 BEGIN;  
 SELECT * FROM users WHERE id IN (1, 2, 3) FOR UPDATE;  
 ...  
-COMMIT;
 
 -- Transaction B
 BEGIN;  
 SELECT * FROM users WHERE id IN (3, 2, 1) FOR UPDATE;  
 ...
-COMMIT
+```
+
+執行以下 SQL 可以看到 Lock 狀態：
+```sql
+SELECT * FROM performance_schema.data_locks;
 ```
 
 得到結果如下圖，可以看到 Transaction A `id = (1,2,3)` 有上鎖成功，實際執行是拿到 Transaction B `id = 1` 的鎖卡住，由此可見上鎖順序跟 SQL 寫法無關。
@@ -502,18 +500,17 @@ SELECT * FROM performance_schema.data_locks;
 可以看到分別有兩筆 Lock：
 1. **Intention Lock**: 第一行是 Lock Type 為 Table 且 Lock Mode 為 `(IX)` 的意向排他鎖 (Intention Exclusive Lock)。
 2. **Row Lock**: 第二行是
-   - Lock Type 為 Record
-   - Lock Index 為 PRIMARY
-   - Lock Mode 為 **X,REC_NOT_GAP**
-     - X 代表排他鎖 (Exclusive Lock)
-     - REC_NOT_GAP 代表不是 Gap Lock 只鎖單一 Record 不影響 `INSERT` 行為
-   - LOCK_DATA 代表被鎖住的 Index 資料，也就是 `id=1` 的資料。
+   - `Lock Type` 為 `Record`
+   - `Lock Index` 為 `PRIMARY`
+   - `Lock Mode` 為 **X,REC_NOT_GAP**
+     - `X` 排他鎖 (Exclusive Lock)
+     - `REC_NOT_GAP` 代表不是 Gap Lock 只鎖單一 Record 不影響 `INSERT` 行為
+   - `LOCK_DATA` 代表被鎖住的 Index 資料，也就是 `id=1` 的資料。
+
+
+
 
 ![alt text](imgs/image-4.png)
-
-
-
-
 
 接下來：
 
@@ -524,33 +521,64 @@ SELECT * FROM users WHERE name = 'apple' FOR UPDATE;
 ...
 ```
 
-執行 `SELECT * FROM performance_schema.data_locks;` 可看到：
+再次執行 
+```sql
+SELECT * FROM performance_schema.data_locks;
+```
 
-![Screenshot 2026-01-05 at 22.42.59](https://hackmd.io/_uploads/r1dkCBtNWg.png)
+可以看到出現四個 Lock：
 
-出現四個 Lock：
-
+![alt text](imgs/image-7.png)
 1. **Intention Lock** : TABLE 的 Intention Lock 。
 2. **Name Index Lock** : 使用 Name Index 對兩筆 name=apple 資料上
-   - Lock Type 為 Record
-   - Lock Index 為 name
-   - Lock Mode 為 **X,REC_NOT_GAP**
-   - LOCK_DATA 代表被鎖住的 Index 資料，也就是 `name='apple'` 的資料。
-3. **PRIMARY Index Lock** : 同時也需要對 PRIMARY Index id=1 & id=3 上 Exclusive Record Lock，但 PRIMARY 是唯一索引沒有 Gap Lock 所以有 **REC_NOT_GAP**
+   - `Lock Type` 為 Record
+   - `Lock Index` 為 name
+   - `Lock Mode` 為 **X** , 因為是非唯一索引，會上 Gap Lock 所以沒有 `REC_NOT_GAP`
+   - `LOCK_DATA` 代表被鎖住的 Index 資料，也就是 `name='apple'` 的資料。
+3. **PRIMARY Index Lock** : 
+   -  同時也需要對 `PRIMARY Index` `id=1` & `id=3` 上 Exclusive Record Lock (X)
+   -  但 PRIMARY <span style="color: green">是唯一索引</span>沒有 Gap Lock 所以有 `REC_NOT_GAP`
 4. **Gap Lock** : 最後會在 `name` Index 上一個 Exclusive Gap Lock，由於 name 排序是 apple => banana，所以 Gap Lock 會鎖住這段 [apple, banana] (包含 apple，不包含 banana) 範圍的 `insert` 行為
 
-隨後執行，`INSERT INTO users (name) VALUES ('apple'), ('apple2')` 在 `[apple, banana]` 範圍 Insert 資料，卡住後會發現 Lock 多了兩個：
+> [!TIP]
+> - **唯一索引 (Unique):** 如果你用 WHERE id = 1 (唯一索引) 鎖定，資料庫能保證全表只會有一筆 id=1。只要鎖住這一行 (Record Lock)，就能阻止別人修改或刪除它；而別人想插入 id=1 也會被 Unique Constraint 擋住，所以不需要鎖間隙 (除非查詢的目標不存在)。
+> - **非唯一索引 (Non-Unique Index):** 即使你鎖住了目前所有 `name='apple'` 的資料，並不代表不能有新的 name='apple' 被插入。
+> 如果不鎖 Gap，另一個 Transaction 可能會插入一筆 id=99, name='apple'。
+> 這樣當你再次查詢 name='apple' 時，就會憑空多出一筆資料 (幻讀)。
+> 因此，InnoDB 必須鎖住 apple 索引紀錄前後的間隙 (Gap)，宣告「這個值的範圍內，暫時不准任何人插入新資料」。
 
-![Screenshot 2026-01-05 at 23.06.08](https://hackmd.io/_uploads/BJCEmUFVbe.png)
+
+隨後執行以下SQL在 `[apple, banana]` 範圍 Insert 資料
+```sql
+INSERT INTO users (name) VALUES ('apple'), ('apple2')` 
+``` 
+
+這實際上會被卡住，卡住後會發現 Lock 多了兩個：
+
+![alt text](imgs/image-8.png)
+
 
 1. **Intention Lock**: 多一個 Intention Lock，Intention Lock 跟 Intention Lock 不會互斥，所以是 GRANTED 狀態
 2. **WAITING Lock**: 多一個 Exclusive, Gap, Insert Intention Lock 狀態是 WAITING，代表 Insert 操作被其他 Gap Lock 卡住了。
 
-另外如果將 `select * from users where name = "apple" for update;`換成 `SELECT * FROM users WHERE name = "banana" FOR UPDATE`，由於排序上 banana 是最後一筆資料，Gap Lock 會變這樣：
+另外如果將 
 
-![Screenshot 2026-01-05 at 23.11.21](https://hackmd.io/_uploads/Hks_EIY4-l.png)
+```sql
+-- SELECT * FROM users WHERE name = "apple" FOR UPDATE;
 
-supremum pseudo-record 代表向上無限衍生且不存在的紀錄 ，對該紀錄上 Exclusive Lock 會導致 INSERT 資料若排序在 banana 後面都會卡住 (e.g INSERT INTO users (name) VALUES ('dog'), ('cat') )。
+-- 換成 
+SELECT * FROM users WHERE name = "banana" FOR UPDATE
+```
+
+由於排序上 `banana` 是最後一筆資料，Gap Lock 會變 `supremum pseudo-record`：
+
+![alt text](imgs/image-9.png)
+
+代表向上無限衍生且不存在的紀錄 ，對該紀錄上 Exclusive Lock 會導致 INSERT 資料若排序在 `banana` 後面都會卡住, 例如：
+```sql
+-- 會卡住
+INSERT INTO users (name) VALUES ('dog'), ('cat')
+```
 
 > [!NOTE]
 > ### 總結幾個常見的 Lock Mode
