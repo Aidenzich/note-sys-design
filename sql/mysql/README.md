@@ -8,8 +8,8 @@
 | [x] | Transaction | [mysql-transaction.md](./mysql-transaction.md) | 交易機制 |
 | [x] | Lock | [mysql-lock.md](./mysql-lock.md) | 鎖機制與並發控制 |
 | [x] | Explain | [mysql-explain.md](./mysql-explain.md) | SQL 執行計畫分析 |
-| [ ] | Write Durability | [mysql-write-durability.md](./mysql-write-durability.md) | 寫入持久性機制 |
 | [ ] | Flush | [mysql-flush.md](./mysql-flush.md) | Flush 刷新機制 |
+| [ ] | Write Durability | [mysql-write-durability.md](./mysql-write-durability.md) | 寫入持久性機制 |
 | [ ] | Schema | [mysql-schema.md](./mysql-schema.md) | Schema 設計原則 |
 | [ ] | Partition | [mysql-partition.md](./mysql-partition.md) | 表分區策略 |
 | [ ] | Master-Slave | [mysql-master-slave.md](./mysql-master-slave.md) | 主從複製架構 |
