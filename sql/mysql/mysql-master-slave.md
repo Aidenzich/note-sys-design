@@ -2,118 +2,139 @@
 
 # MySQL 如何應付大量查詢流量？(Binlog, Slave DB)
 
-隨著系統業務量增加，即便將查詢優化到極致，系統仍會負荷不了瞬間大量查詢，此時只剩垂直與水平擴充兩個選項，垂直擴充相對簡單，提升硬體 CPU 和記憶體，但缺點是升級時需要停機，因此水平擴充較為常見，MySQL 常見的 Cluster 架構就是 Master-Slave 架構，一台 Master 處理寫入請求並同步給多台 Slave，而多台 Slave 負責查詢請求。
+隨著系統業務量增加，即便將查詢優化到極致，系統仍會負荷不了瞬間大量查詢，此時只剩垂直與水平擴充兩個選項，垂直擴充相對簡單，提升硬體 CPU 和記憶體，但缺點是升級時需要停機，因此水平擴充較為常見，<span style="color: orange">MySQL 常見的 Cluster 架構就是 Master-Slave 架構，一台 Master 處理寫入請求並同步給多台 Slave，而多台 Slave 負責查詢請求。</span>
 
 ## 為何只需要一台 Master？寫入請求不需要分流嗎？
 
 多 Master 的 Cluster 架構較複雜且容易出錯，例如：
 
-- 多台 Master 同時更新相同資料時，誰的結果是最新的
-- 採用 Data Sharding 會造成跨 Server Transaction 實作 ACID 困難
-且寫入比讀取花更少 CPU 和記憶體，通常查詢頻率又比寫入高，因此需要分流通常是查詢請求，因此單 Master 多 Slave 架構能降低複雜性，並分散查詢請求提升負載上限。
+- 多台 Master 同時更新相同資料時，誰的結果是最新的？
+- 採用 Data Sharding 會造成跨 Server Transaction 實作 ACID 困難，且：
+  - 寫入比讀取花更少 CPU 和記憶體
+  - 通常查詢頻率又比寫入高，需要分流的通常是查詢請求
+  - 因此單 Master 多 Slave 架構能降低複雜性，並分散查詢請求提升負載上限。
 
-那麼 Master 如何向 Slave 同步資料？
+### Master 如何向 Slave 同步資料？
 
-當 Master 收到更新請求 (e.g `INSERT`, `UPDATE`, `DELETE` ) 時，需要即時將修改內容同步給 Slave，同步方式有兩種，Push & Pull：
+當 Master 收到更新請求 (e.g `INSERT`, `UPDATE`, `DELETE` ) 時，需要即時將修改內容同步給 Slave，同步方式有兩種，**Push & Pull**：
 
-**Master Push 方式** -  Master 主動推送更新資料給 Slave
+#### 同步方式比較：Push vs Pull
 
-- 優點
-資料更新後能立即推送，資料同步延遲低
+| 同步模式 | 運作方式 | 優點 (Pros) | 缺點 (Cons) |
+| :--- | :--- | :--- | :--- |
+| **Master Push** | Master 主動推送更新資料給 Slave | **資料同步延遲低**<br>(Real-time) | **Master 實作複雜**<br>(需紀錄每台 Slave 進度、多 Thread 推送) |
+| **Slave Pull** | Slave 主動向 Master 拉取更新資料 | **Master 邏輯單純、資源消耗低**<br>(Slave 自行管理進度，Master 僅寫入 Queue) | **資料同步延遲較高**<br>(受 Polling 間隔影響) | 
 
-- 缺點
-Master 需要紀錄不同 Slave 接收進度並透過不同 Thread 推送不同進度資料，Master 端實作複雜
+在單 Master 架構中，Master 是唯一寫入點，其穩定性與效能很重要。為了降低 Master 的複雜度與負載風險，MySQL 採用 **Slave Pull** 的設計，雖然資料同步會有些許延遲，但優點是：
+- Master 專注於寫入，不需追蹤每個 Slave 的進度或管理推送邏輯。
+- Slave 可根據自身能力調整拉取頻率與批次大小，在資料量大時一次拉取更多資料，反而提高處理效率。
 
-**Slave Pull 方式** - Slave 向 Master 拉取更新資料
-
-- 優點
-    - 由 Slave 管理接受進度，Master 邏輯單純，只負責將變更資料寫進 Queue 中， Slave 依照各自進度讀取
-    - 多台 Slave 不會佔用 Master 太多額外資源，因為 Master 不用管理 Slave 進度 
-- 缺點
-    - 透過 Polling 方式讀取資料，Polling 間隙時間會導致資料同步延遲 
-
-在單 Master 架構中，Master 是唯一寫入點，其穩定性與效能很重要。為了降低 Master 的複雜度與負載風險，MySQL 採用 Slave 主動拉取資料 的設計，雖然資料同步會有些許延遲，但優點是：
-
-- Master 專注於寫入，不需追蹤每個 Slave 的進度或管理推送邏輯
-- Slave 可根據自身能力調整拉取頻率與批次大小，在資料量大時一次拉取更多資料，反而提高處理效率
-
-而在拉取模式下，Master 要將**變更資料先寫入一個暫存區**，讓不同的 Slave 依照其進度拉取資料，而這個暫存區就是 Binlog！
+而在拉取模式下，Master 要將**變更資料先寫入一個暫存區**，讓不同的 Slave 依照其進度拉取資料，而這個暫存區就是 **Binlog**！
 
 ## 為何需要新的儲存區？不能用 Redo Log 嗎？
 
-既然所有寫入都會先寫到 Redo Log 中，Slave 不能直接去 Redo Log 拉資料同步嗎？然而，直接用 Redo Log 同步資料有兩個缺點：
+既然所有寫入都會先寫到 `Redo Log` 中，Slave 不能直接去 Redo Log 拉資料同步嗎？
 
-- Redo Log 屬於 InnoDB 是 Storage Engine 結構，如果換一個 Engine 需要修改 Slave 同步邏輯，缺乏系統彈性。
-- 資料同步至 B+Tree 後就會從 Redo Log 清除，不會等到所有 Slave 成功同步在清除，不符合同步所需的持久性保障。
-因此 MySQL 需要在 SQL Layer 層使用 Binlog 結構用來當作 Slave 同步的暫存區。
+然而，直接用 `Redo Log` 同步資料有兩個缺點：
 
-![Screenshot 2026-01-06 at 20.49.04](https://hackmd.io/_uploads/S1BoNK5E-x.png)
+- `Redo Log` 屬於 InnoDB 是 Storage Engine 結構，如果換一個 Engine 需要修改 Slave 同步邏輯，缺乏系統彈性。
+- 資料同步至 B+Tree 後就會從 `Redo Log` 清除，不會等到所有 Slave 成功同步在清除，不符合同步所需的持久性保障。
 
-而 Binlog 的儲存格式有分：
+因此 MySQL 需要在 SQL Layer 層使用 `Binlog` 結構用來當作 Slave 同步的暫存區。
+![alt text](imgs/image-12.png)
 
-STATEMENT：直接儲存 SQL 指令內容 (e.g INSERT )
-- 優點：佔用硬碟空間小
-- 缺點：非確定性函數 (e.g NOW(), RAND() )會導致 Master Slave 資料不一致
 
-ROW：直接儲存修改後的完整資料內容
-- 優點：Master Slave 數據精準一致，不用解析 SQL 指令同步效率高
-- 缺點：佔用大量空間
+#### Binlog 儲存格式比較
 
-MIXED：結合 Statement & Row 依照 MySQL 自行判斷何時要用哪個
-- 優點：平衡資料大小以及空間消耗
-- 缺點：不可預測性，無法確保 MySQL 行為跟你預期的一樣
+| 格式 (Format) | 內容 (Content) | 優點 (Pros) | 缺點 (Cons) |
+| :--- | :--- | :--- | :--- |
+| **STATEMENT** | **直接儲存 SQL 指令** <br> (e.g. `INSERT ...`) | **空間極小**<br>(只存指令文字) | **資料不一致風險**<br>(非確定性函數如 `NOW()`, `RAND()` 在 Slave 可能算出不同值) |
+| **ROW** | **儲存修改後的資料列** <br> (Row-based changes) | **資料絕對一致**<br>(精準複製變更結果，無需重新解析 SQL) | **空間巨大**<br>(每一筆受影響的 Row 都要記錄，大量 Update 時會暴增) |
+| **MIXED** | **混合模式** <br> (MySQL 自動判斷) | **平衡空間與安全**<br>(預設用 Statement，遇到非確定性函數自動切換 Row) | **不可預測性**<br>(無法完全掌握 MySQL 當下決定用哪種格式) |
 
-## 寫入要分別同步到 Redo Log ＆ Binlog 兩個結構，會不會有同步 Redo Log 成功到 Binlog 失敗的可能？
+## 寫入要分別同步到 Redo Log ＆ Binlog 兩個結構，會不會有同步 Redo Log 成功但 Binlog 失敗的可能？
 
-如果 Redo Log 成功 Binlog 失敗會造成 Master 和 Slave 資料不一致，因此 MySQL 透過 2-Phased Commit 解決 Redo Log & Binlog 同步議題：
+如果 `Redo Log` 成功 `Binlog` 失敗會造成 Master 和 Slave 資料不一致，因此 MySQL 透過 **2-Phased Commit** 解決 `Redo Log` & `Binlog` 同步議題：
 
-![Screenshot 2026-01-06 at 20.50.41](https://hackmd.io/_uploads/ryXbSt54Zx.png)
+![alt text](imgs/image-13.png)
 
-其核心精神是；
+其核心流程如下 (確保 Redo Log 與 Binlog 一致)：
 
-1. 先執行完所有 Application 層的邏輯，確保沒有任何錯誤
-2. 最後在一起執行 fsync system call 這個最不可能出錯的指令
+1.  **Prepare Phase (InnoDB)**:
+    寫入 Redo Log 並將 Transaction 標記為 `PREPARE` 狀態。
+2.  **Commit Phase (Binlog + InnoDB)**:
+    *   寫入 Binlog (這是真正的 Commit 點)。
+    *   再回到 InnoDB 將 Redo Log 標記為 `COMMIT`。
 
-而 2-Phased Commit 也有 Group Commit 技術，但實作方式 SQL Layer 層聚合多筆 Transaction Commit 後的內容，透過 2-Phased Commit 流程，用一個 Prepare 送出多筆變更，最後執行一個 fsync 寫入多筆內容。
+**Crash Recovery 邏輯**：
+*   若 Crash 發生在步驟 2 之前 (Binlog 未寫入) -> **Rollback**。
+*   若 Crash 發生在步驟 2 之後 (Binlog 已寫入) -> **Commit** (即便 Redo Log 還在 Prepare 狀態，只要 Binlog 有，就算成功)。
+
+---
+
+### Group Commit (效能優化)
+
+原本每筆 Transaction 都要執行多次 disk fsync (Redo Log prepare + Binlog + Redo Log commit)，導致 IOPS 瓶頸。
+**Group Commit** 技術則是將多個同時提交的 Transaction 聚合起來：
+1.  **Queue**: 收集多個 Transaction。
+2.  **Batch Write**: 一次性將它們的 Binlog 寫入磁碟 (只要一次 fsync)。
+3.  **Batch Commit**: 一次性在 InnoDB 完成 Commit。
+
+這大幅減少了 fsync 次數，顯著提升高併發下的寫入效能。
 
 可透過下面參數控制 SQL Layer 聚合方式：
+- `binlog_group_commit_sync_delay` ：等待多久 (單位為微秒) 後執行 Prepare & Fsync
+- `binlog_group_commit_sync_no_delay_count` ：累積多少個 Transaction Commit 後執行 Prepare & Fsync
 
-- binlog_group_commit_sync_delay ：等待多久 (單位為微秒) 後執行 Prepare & Fsync
-- binlog_group_commit_sync_no_delay_count ：累積多少個 Transaction Commit 後執行 Prepare & Fsync
+## Slave 如何知道要從哪裡開始同步？ (Checkpoint 機制)
 
-## Master 寫資料進 Binlog 後，Slave 如何處理這些資料？
+為了避免故障重啟後重頭同步，Slave 必須記錄「上一次同步到哪裡」。MySQL 有兩種紀錄方式：
 
-首先 Slave 要知道從 **Binlog 哪個起點開始同步**，且避免故障重啟要重頭同步，Slave 要記住上次同步的進度。
+### 1. 傳統方式：Binlog File & Position (物理座標)
 
-傳統是 Binlog File Location & Position 方式 (執行 SHOW MASTER STATUS;)：
+這是最早期的方式 (MySQL 5.6 以前預設)，Slave 紀錄的是「檔案名稱 + 檔案內的位移量 (Offset/Bytes)」。可以透過 `SHOW MASTER STATUS` 查看。
 
-![Screenshot 2026-01-06 at 20.51.52](https://hackmd.io/_uploads/HyFrSF5VWl.png)
+*   **File**: Binlog 檔名 (e.g. `mysql-bin.000003`，遞增)
+*   **Position**: 寫入的 Byte Offset (下一個寫入點的起始位置)
 
-File： Binlog 檔案名稱，後面數字為遞增數字，越大代表資料越新
-Position：代表 Binlog 寫入進度，是 bytes 單位，也是下一個寫入的起始位置
+![alt text](imgs/image-14.png)
 
-該方式好理解，但缺點是不同 DB 同步相同 Binlog 內容，但顯示出的 File Location & Position 卻不一定相同：
+> [!CAUTION]
+> **致命缺點：Failover 困難 (座標系不一致)**
+> Position 是「物理座標」，會受到 Server 配置影響 (e.g. 檔名設、Header 長度、壓縮格式)。
+> 即使兩台 DB 資料完全一樣，它們記錄同一筆 Transaction 的 Position 也可能完全不同。
+>  *   舊 Master: Transaction A 寫在 `pos: 500`
+>  *   新 Master (Slave A): Transaction A 寫在 `pos: 502` (因為 Header 可能多 2 bytes)
+>
+> **災難情境**：
+> 1.  舊 Master 掛掉。
+> 2.  Slave B 回報它同步到 `pos: 500` (拿著舊 Master 的地圖)。
+> 3.  你把 Slave B 指向新 Master (Slave A)。
+> 4.  Slave B 說：「請從 `500` 之後傳給我」。
+> 5.  但對新 Master 來說，`500` 可能還在 Transaction A 的資料中間 (因为它結束在 `502`)
+> 6.  **結果**：MySQL 噴錯，同步中斷。需要人工介入，手動找出這筆資料在新 Master 是對應到哪行。
 
-原因是不同 Server 有不同配置，例如不同 Binlog 檔名，是否要壓縮，Format 等等，就算配置都一樣， Binlog 紀錄的 Header 會依照不同 Server 有所差異，就會導致大小不依而產生不同的 Position。
+![alt text](imgs/image-15.png)
+![alt text](imgs/image-16.png)
 
-![Screenshot 2026-01-06 at 20.52.23](https://hackmd.io/_uploads/BJoOrF9VZg.png)
+### 2. 現代方式：GTID (Global Transaction ID) (邏輯座標)
 
-![Screenshot 2026-01-06 at 20.52.28](https://hackmd.io/_uploads/ByzKHYcNZe.png)
+為了解決上述問題，MySQL 5.6 引入了 GTID。這是一個 **跨 Server 唯一的邏輯 ID**，跟檔案位置無關。
 
-而不同 File Location & Position 會帶來 Fail Over 的問題，假設 Master 掛了短時間無法恢復，必須把 Slave 轉成 Master，但轉換後卻發現新 Master 的 File Location & Position 的內容跟舊 Master 不一致，導致其他 Slave 沒法用目前進度來繼續同步新資料，因此需要人工介入，重新設定所有 Slave 的 Binlog 起始點，無法做到自動化 Fail Over。
-
-為了解決該問題，MySQL 使用 Gtid 的出現，跨 DB 的唯一 Transaction ID，其格式為 _source_id_:_transaction_id ：
-
-- source_id：該 Transaction 來源的 MySQL Server ID，跨 Server 唯一
-- transaction_id：來源 MySQL Server 所生產的遞增 ID
+*   **格式**: `source_uuid:transaction_id`
+    *   `source_uuid`: 該 Transaction 來源 Server 的唯一 ID。
+    *   `transaction_id`: 遞增序號。
+*   **運作**: 每筆 Transaction 都有一個專屬 ID。Slave 只要紀錄「我已經執行過哪些 ID (GTID Set)」。
+*   **優點**: **自動化 Failover**。Slave 切換 Master 時，MySQL 會自動比對 GTID Set，自動補齊缺少的資料，無需人工計算 Position。
 
 ![Screenshot 2026-01-06 at 20.53.36](https://hackmd.io/_uploads/B18nHFcV-g.png)
 
-如圖，相同的 Binlog 內容，雖然 File Location & Position 不同，但 Executed_Gtid_set 相同，Gtid Set 是用來表達多個 Gtid 的格式 ( `source_id:begin_transaction_id-last_transaction_id` )，例如：
+如圖，即便 File Location & Position 不同，但 **Executed_Gtid_set** 是相同的，這讓 Cluster 管理變得簡單許多。
 
-- Retrieved Gtid Set：從 Master 拉下來的 GTID 集合
-- Executed Gtid Set：實際寫入到 Redo Log 的 GTID 集合
-- Purged Gtid Set : 已同步過的 GTID 集合。
+**GTID 相關變數**：
+- `Retrieved_Gtid_Set`: 從 Master 拉下來的 GTID 集合 (Relay Log)。
+- `Executed_Gtid_Set`: 已經執行並寫入 Binlog 的 GTID 集合。
+- `Purged_Gtid_Set`: 已經被清除 (Purge) 掉的 GTID 集合。
 
 ## Slave 是怎麼同步資料進硬碟的？
 
