@@ -329,241 +329,242 @@ SOURCE_AUTO_POSITION = 1;
 START REPLICA;  
 ```
 
-`SOURCE_AUTO_POSITION=1` 代表使用 `gtid` 同，可執行 `SHOW SLAVE STATUS;` 檢查 Slave 同步狀況：
+## 驗證同步狀態
 
-確認 Slave IO & SQL Thread 執行中，就沒問題了！
+執行以下指令檢查同步狀態：
 
-從頭建立 Cluster 簡單，但在既有的 Cluster 加入新 Slave 就有新的挑戰了。
-
-當 Master Binlog 過期遺失後，新加入的 Slave 無法透過 Binlog 同步到完整資料時該怎麼辦？
-
-**第一個方法是邏輯備份**，透過 `mysqldump` 將 Master DB 所有資料轉換成 SQL 指令輸出到特定檔案：
-
-```shell!
-mysqldump -h 127.0.0.1 -u root --password=secret  
---single-transaction \ <= 使用 snapshot transaction 讀資料  
---quick \ <= 使用批次處理避免一次載入大量資料到記憶體  
---skip-lock-tables \ <= 明確指定不要 Lock Table  
---set-gtid-purged=ON \ <= 產生 GTID_PURGED 指令  
-local_test > backup.sql
+```sql
+SHOW SLAVE STATUS\G;
 ```
 
-執行後，會在 `backup.sql` 裡面看到 Master DB 將 Schema 以及資料轉成 `CREATE TABLE` 和 `INSERT` 的指令。
+重點檢查以下兩個欄位必須為 `Yes`：
+*   **`Slave_IO_Running`**: 連線正常，正在拉取 Binlog。
+*   **`Slave_SQL_Running`**: 執行正常，正在回放 SQL。
 
-`SQL_LOG_BIN=0` 是避免執行下面指令時把資料寫入 binlog，由於是用 `mysqldump` 還原資料而不是 binlog replay，所以將 `backup.sql` 內容同步到 binlog 會造成 Cluster 內有相同 binlog 內容但不同 gtid 的情況。
+---
 
-設定 `GTID_PURGED` 為 `mysqldump` 拉資料當下 Master 已完成的 GTID Set，讓 Slave 在同步完 `backup.sql` 內容可以直接啟動 Replica 同步後續 binlog 資料，避開重複資料。
+## 如何在既有 Cluster 中加入新 Slave？ (Database Backup & Restore)
 
-邏輯備份較耗時且資料量大時產生的 `backup.sql` 內容會特別大且複雜，備份過程也會消耗 master db 的 CPU。
+建立全新的 Cluster 很簡單，但要在一個「已經運行很久、資料量很大」的 Cluster 中加入一台新的 Slave，挑戰就來了：
+**Master 的 Binlog 可能早就過期被刪除了 (Expired)**，新 Slave 無法從第一筆 Binlog 開始追。
 
-**第二個方法是物理備份**，直接複製 MySQL `datadir` 底下資料，但備份方式不是單純執行 `cp` 指令就好，因為在複製的過程中，資料仍不斷在更新，單純複製會發生資料不一致的問題，例如 複製完前半段包含 id=100 的資料，隨後複製後半段 id=200 資料，此時同時更新了 `id = 100` & `id = 200` 資料會導致 `id=100` 為舊資料 `id=200` 為新資料。
+這時我們必須先將 Master 目前的資料 **「搬運」** 到 Slave 上，讓 Slave 擁有一個近期的基準點 (Snapshot)，再利用 Binlog 追趕剩下的進度。
+主要有兩種搬運方式：**邏輯備份** 與 **物理備份**。
 
-為了解決這個問題需要使用 `Percona XtraBackup` 工具，其備份資料的也包含 redo log 內容，在備份完後，透過指令去 Replay redo log 內容就能讓資料更新到最新狀態。
+### 方法 1: 邏輯備份 (Logical Backup) - mysqldump
 
-```shell
-# 使用 percona-xtrabackup 從 master 複製檔案到 backup folder 中  
-docker run --rm \  
---network compose_mysql_cluster \  
---user=root \  
--v ./data/mysql4:/backup \  
---volumes-from mysql1 \  
-percona/percona-xtrabackup:8.0 \  
-xtrabackup --backup \  
---target-dir=/backup \  
---host=mysql \  
---user=root \  
---password=secret --no-lock  
+**邏輯備份**是將 DB 中的資料全部轉譯成 `INSERT` SQL 語法。
 
-# replay redo log 更新資料到最新狀態  
-docker run --rm \  
---network compose_mysql_cluster \  
---user=root \  
--v ./data/mysql4:/backup \  
---volumes-from mysql1 \  
-percona/percona-xtrabackup:8.0 \  
-xtrabackup --prepare \  
---target-dir=/backup \  
---host=mysql \  
---user=root \  
---password=secret --no-lock
+#### 備份指令 (Master 端)
+
+```bash
+mysqldump -h 127.0.0.1 -u root -p \
+  --single-transaction \   # (關鍵) 使用 Snapshot Read，確保備份過程中不鎖表且資料一致
+  --quick \                # 逐行讀取，避免一次將大量資料載入記憶體 (OOM)
+  --master-data=2 \        # (關鍵) 在輸出檔中註記當下的 Binlog Position/GTID (作為同步起點)
+  --set-gtid-purged=ON \   # 輸出 GTID_PURGED 設定，告訴 Slave 這些 GTID 已包含在 Dump 檔中
+  --triggers --routines --events \
+  local_test > backup.sql
 ```
 
-物理備份限制是版本跟設定要一致，避免出現對資料格式不兼容的情況，但備份速度比邏輯備份快上很多。
+#### 還原與設定 (Slave 端)
 
-### 架設完 Cluster 後，要如何做到自動 Auto Fail Over？
+```sql
+-- 1. 暫時關閉 Binlog 寫入，避免還原過程產生大量無意義 Log
+SET SQL_LOG_BIN=0;
 
-[orchestrator](https://github.com/openark/orchestrator) 是一個 MySQL Cluster 管理工具，提供 GUI 管理 MySQL Server 的網路關係，並提供 Server 狀態追蹤以及 Auto Fail Over 的功能。
+-- 2. 匯入資料 (這會執行大量的 INSERT)
+SOURCE /path/to/backup.sql;
 
-![Screenshot 2026-01-06 at 21.06.31](https://hackmd.io/_uploads/HJFndK94bg.png)
+-- 3. 匯入完成後，backup.sql 內含的 SET @@GLOBAL.GTID_PURGED='...' 
+--    已經告訴 Slave 哪些 GTID 不需要再跟 Master 要了。
 
-啟動 orchestrator 前要設定好配置：
+SET SQL_LOG_BIN=1;
 
-基礎配置 - 連上 MySQL Server 的通用帳號密碼，以及 Orchestrator 用的 DB 配置，Orchestrator 會用額外 DB 來儲存 Cluster 資訊
+-- 4. 啟動同步
+START SLAVE;
+```
 
+#### 優缺點分析
+| 特性 | 說明 |
+| :--- | :--- |
+| **優點** | **相容性高** (可跨版本、跨平台)、**可讀性高** (就是文字檔)。 |
+| **缺點** | **速度慢** (需由 CPU 解析 SQL)、**還原久** (需重建 Index)、**消耗 Master 資源**。 |
+
+---
+
+### 方法 2: 物理備份 (Physical Backup) - Percona XtraBackup
+
+**物理備份**是直接複製 MySQL 的 data 檔案 (`.ibd` files)。但因為複製過程中資料仍在變動，直接 `cp` 複製出來的檔案是**損毀的 (Inconsistent/Corrupt)**。
+`Percona XtraBackup` 解決了這個問題：它在複製檔案的同時，會監控並複製 `Redo Log`。
+
+#### 步驟 1: 備份 (Backup)
+從 Master 複製檔案，並紀錄備份期間產生的 Redo Log。
+
+```bash
+docker run --rm \
+  --volumes-from mysql_master \
+  -v ./backup:/backup \
+  percona/percona-xtrabackup:8.0 \
+  xtrabackup --backup \
+  --target-dir=/backup \
+  --user=root --password=secret --host=mysql_master
+```
+
+#### 步驟 2: 準備 (Prepare) - **最關鍵的一步**
+利用備份期間抓到的 `Redo Log`，對剛剛複製下來的檔案進行 **Crash Recovery**，將檔案修復成一致的狀態。
+
+```bash
+docker run --rm \
+  -v ./backup:/backup \
+  percona/percona-xtrabackup:8.0 \
+  xtrabackup --prepare \  # (關鍵) 重放 Redo Log
+  --target-dir=/backup
+```
+
+完工後，直接將 `/backup` 資料夾塞回 Slave 的 `datadir` 即可啟動。
+
+#### 優缺點分析
+| 特性 | 說明 |
+| :--- | :--- |
+| **優點** | **速度極快** (直接硬碟 IO 複製)、**還原快** (無需重建 Index)、**對 Master 影響小**。 |
+| **缺點** | **限制嚴格** (OS、MySQL 版本需一致)、**檔案巨大**。 |
+
+---
+
+## 如何實現自動故障轉移 (Auto Failover)？ - Orchestrator
+
+Master 即使再強壯也可能掛掉。我們需要一個「管理員」來監控 Cluster，當 Master 死掉時，自動選出一台最強的 Slave 晉升為新 Master，並讓其他 Slave 改跟隨新 Master。
+這個工具就是 **[Orchestrator](https://github.com/openark/orchestrator)**。
+
+![Orchestrator Topology](https://hackmd.io/_uploads/HJFndK94bg.png)
+
+### 1. 核心配置 (Configuration)
+
+`orchestrator.conf.json` 重點參數解析：
+
+#### 基礎連線
+Orchestrator 需要連線到 MySQL Cluster 進行監控 (`MySQLTopologyUser`)，也需要一個自己的 DB 存狀態 (`MySQLOrchestrator*`)。
 ```json
-"MySQLTopologyUser": "root", => 連上 mysql server 通用帳號  
-"MySQLTopologyPassword": "secret", => 連上 mysql server 通用密碼  
-"DefaultInstancePort": 3306, => 連上 mysql server 預設 port  
-"MySQLOrchestratorHost": "orchestrator_db", => orchestrator 儲存 cluster 資訊的 db host  
-"MySQLOrchestratorDatabase": "orchestrator", => orchestrator 儲存 cluster 資訊的 db name  
-"MySQLOrchestratorUser": "root", => orchestrator 儲存 cluster 資訊的 db 帳號  
-"MySQLOrchestratorPassword": "secret", => orchestrator 儲存 cluster 資訊的 db 密碼  
-"MySQLOrchestratorPort": 3309, => orchestrator 儲存 cluster 資訊的 db port  
-"ListenAddress": ":3000", => orchestrator admin gui port number  
-"InstancePollSeconds": 5,  
-"UnseenInstanceForgetHours": 1,  
-"HTTPAuthUser": "admin", => admin 帳號  
-"HTTPAuthPassword": "secret", => admin 密碼
+{
+  "MySQLTopologyUser": "orchestrator_monitor",
+  "MySQLTopologyPassword": "secret",
+  "MySQLOrchestratorHost": "orchestrator_db",
+  "MySQLOrchestratorDatabase": "orchestrator",
+  // ...
+}
 ```
 
-服務發現配置 - Orchestrator 會透過 Master DB 主動發現 Slave，可在 GUI 畫面上設定一個 Master DB 連線 host & port ，並用兩種方式發現 Slave：
+#### 服務發現 (Service Discovery)
+Orchestrator 如何找到所有的 Slave？
+*   **方法 A (推薦)**: `DiscoverByShowSlaveHosts: true`。利用 MySQL `SHOW SLAVE HOSTS` 指令 (需配置 `report_host`)。
+*   **方法 B**: 掃描 Processlist，尋找連接中的 Binlog Dump Thread。
 
-- `DiscoverByShowSlaveHosts` 參數為 True - Orchestrator 會執行 show slave hosts 指令找 slave
-- `DiscoverByShowSlaveHosts` 參數為 False - Orchestrator 會執行 `select substring_index(host, ‘:’, 1) as slave_hostname from information_schema.processlist where command IN (‘Binlog Dump’, ‘Binlog Dump GTID’)` Query 找 slave
+#### 拓樸解析 (Topology Resolution)
+在 Docker 或複雜網路環境中，Hostname 可能無法解析。
+*   **`HostnameResolveMethod`**: 如何將 Hostname 轉為 IP (e.g., `default`, `env:HOSTNAME`).
+*   **`MySQLHostnameResolveMethod`**: 當 Slave 回報 Master 是 "mysql1" 時，Orchestrator 該如何理解 "mysql1" 是誰。
 
-當獲得 Master & Slave Host 後，透過 [HostnameResolveMethod](https://github.com/openark/orchestrator/blob/master/docs/configuration-discovery-resolve.md) ＆ [MySQLHostnameResolveMethod](https://github.com/openark/orchestrator/blob/master/docs/configuration-discovery-resolve.md) 參數將 Host 解析成 IP：
+### 2. 故障轉移機制 (Failover Logic)
+當 Orchestrator 偵測到 Master 連不上時，會觸發 Failover 分析：
 
-- HostnameResolveMethod：解析 master or slave hostname 的方式，例如在 docker 環境你會收到 mysql1 之類的，若 orchestrator 不在 docker 環境中你就需要將 mysql1 解析成 ip，此時可以將 HostnameResolveMethod 設定為 ip，也可設定成 none 不解析。
+1.  **DeadMaster**: Master 連不上。
+2.  **SlavesDangling**: 該 Master 底下的 Slaves 也回報連不到 Master (確認不是 Orchestrator 自己的網路問題)。
 
-- MySQLHostnameResolveMethod：連上 Slave 後 Orchestrator 會執行 `SHOW SLAVE STATUS` 指令儲存 Slave 與 Master 關連，但如果 Orchestrator 是用 IP 連上 Master，但 Slave 是用 container (e.g mysql1) 連上 Master，資料比對會有問題，因此要透過該參數設定解析 MySQL IP 轉成 mysql1，例如設定參數為 report_host 會執行 `@@**global**.report_host` 獲取 MySQL 環境變數中 report_host 設定。
+![Screenshot 2026-01-06 at 21.11.06](https://hackmd.io/_uploads/HkN0Yt5EZe.png)
+![Screenshot 2026-01-06 at 21.11.13](https://hackmd.io/_uploads/SJOAFFcNbg.png)
 
-Auto Failover 配置 - Orchestrator 會定期檢查 Master 狀態，當有連線問題，且其他 Slave 也與他失聯後，就會啟動 Auto Failover：
+**關鍵參數：**
+*   **`ApplyMySQLPromotionAfterMasterFailover`**: `true`。允許 Orchestrator 自動執行寫入動作 (提拔 Slave)。
+*   **`PreventCrossDataCenterMasterFailover`**: 避免選到跨機房的 Slave (延遲考量)。
+*   **`FailMasterPromotionIfSQLThreadNotUpToDate`**: 若 Slave 資料落後太多，禁止提拔 (避免資料遺失)。
 
-- **ApplyMySQLPromotionAfterMasterFailover**：是否啟動 Failover，啟動後會透過 reset slave all & set read_only=0 指令將 slave 換成 master
-- **PreventCrossDataCenterMasterFailover**：受否要避免相同 DataCenter 的 Slave 被提拔成 Master
-- **PreventCrossRegionMasterFailover**：受否要避免相同 Region 的 Slave 被提拔成 Master
-- **FailMasterPromotionIfSQLThreadNotUpToDate**：如果當 Slave Relay Log 都還沒 Replay 完是否要讓 Fail Over 失敗
-- **FailMasterPromotionOnLagMinutes** : 當 Slave binlog lag 太久就要讓 Fail Over 失敗
-
-另外也可以設置 Hook 來通知 Orchestrator 正在執行 Fail Over：
-
-```json!
-"PreFailoverProcesses": [  
-"echo 'Will recover from {failureType} on {failureCluster}' >> /tmp/recovery.log"  
-],  
-"PostFailoverProcesses": [  
-"echo '(for all types) Recovered from {failureType} on {failureCluster}. Failed: {failedHost}:{failedPort}; Successor: {successorHost}:{successorPort}' >> /tmp/recovery.log"  
+### 3. Hooks (Webhooks/Scripts)
+Failover 前後可以執行 Script 通知 Slack 或呼叫 API。
+```json
+"PostFailoverProcesses": [
+  "echo 'Recovered from {failureType} on {failureCluster}. New Master: {successorHost}' >> /tmp/recovery.log"
 ],
 ```
 
-![Screenshot 2026-01-06 at 21.11.06](https://hackmd.io/_uploads/HkN0Yt5EZe.png)
 
-![Screenshot 2026-01-06 at 21.11.13](https://hackmd.io/_uploads/SJOAFFcNbg.png)
 
-## 最後，當 Master 替換後，Client 要如何在不替換連線的情況下將寫入請求送到新 Master？
 
-可在 Cluster 前架設一個 [Proxy SQL](https://proxysql.com/)，透過 Proxy 自動分流，當 Master 替換成不同 Server，Proxy 也能自動偵測改變分流路線，程式端完全不需要修改配置。
+## Client 如何無痛切換？ - ProxySQL (Traffic Routing)
 
-Proxy SQL 除了分流 SQL 到不同 SQL Server 之外，還提供了：
+Orchestrator 換了 Master，但 Application 的 config 檔寫的還是舊 IP 怎麼辦？
+我們需要在 App 與 DB 之間加一層 **Layer 7 Load Balancer** —— **[ProxySQL](https://proxysql.com/)**。
 
-- 統一管理連線池，避免太多 Server 各自建立大量連線，衝爆 MySQL Server 連線上限。
-- 提供高度客製化的查詢快取，針對特定 Query 語法設定快取以及 TTL 時間。
-- Query Rewrite 功能，例如把 SELECT * 改成 SELECT id, name。
+App 只需連線到 ProxySQL，由 ProxySQL 負責將 SQL 轉發給當下的 Master 或 Slave。
 
-Proxy SQL 本身自帶 SQLite 資料庫，會將 Cluster 連線資訊以及分流規則紀錄在裡面，此外也有很多系統參數可以微調行為，可以參考 https://proxysql.com/documentation/global-variables/。
+### ProxySQL 核心功能
+1.  **Read/Write Split (讀寫分離)**: 自動將 `SELECT` 導向 Slave，`INSERT/UPDATE` 導向 Master。
+2.  **Connection Pooling**: 復用連線，保護後端 DB 不被瞬間連線衝垮。
+3.  **Failover Awareness**: 當 Orchestrator 切換 Master 後，ProxySQL 會自動偵測 `read_only` 狀態，調整路由。
 
-以下提供基礎配置：
+### 基礎配置範例
 
-```json!
-# 配置 sqlite 儲存路徑  
-datadir="/var/lib/proxysql"  
-  
-# 配置 proxy sql admin 帳號密碼，以及模擬 mysql 介面的入口點  
-# 使用者透過登入 admin 帳號來調整 proxy sql 設定  
-admin_variables =  
-{  
-    admin_credentials="admin:admin"  
-    mysql_ifaces="0.0.0.0:6032"  
-}  
-  
-# 設定 mysql server 監控用的帳號密碼  
-mysql_variables =  
-{  
-    monitor_username="root"  
-    monitor_password="secret"  
-}  
-  
-# 設定叢集資訊，hostgroup 1 為 master 2 為 slave，設定完後  
-# proxysql 會定時監控 hostgroup 內的 mysql server read_only 參數  
-# 並調整到正確的 host group id  
-mysql_replication_hostgroups =  
-(  
-    {  
-        writer_hostgroup=1  
-        reader_hostgroup=2  
-        comment="cluster1"  
-    }  
-)  
-  
-# 設定 mysql server 連線資訊，hostgroup 可以都設定成 1  
-# 等 proxysql 透過 read_only 參數自行調整  
-mysql_servers =  
-(  
-    {  
-        address="mysql1"  
-        port=3306  
-        hostgroup=1  
-        max_connections=200  
-    },  
-    {  
-        address="mysql2"  
-        port=3307  
-        hostgroup=1  
-        max_connections=200  
-    },  
-    {  
-        address="mysql3"  
-        port=3308  
-        hostgroup=1  
-        max_connections=200  
-    }  
-)  
-  
-# proxy sql 連上 mysql_servers 的帳號  
-# application server 同時也會用該組帳號連上 proxysql  
-# 再由 proxysql forward sql 到後面的 mysql server  
-mysql_users =  
-(  
-    {  
-        username = "root"  
-        password = "secret"  
-        default_hostgroup = 1  
-        max_connections=1000  
-        default_schema="information_schema"  
-        active = 1  
-    }  
-)  
-  
-# 定義 query 分流規則，match_pattern 可以用 regex 去寫  
-# 不用擔心每次分流都要通過一次 regex match 影響效能  
-# proxy sql 會 cache 起來  
-mysql_query_rules =  
-(  
-    {  
-        rule_id=1  
-        active=1  
-        username="root"  
-        match_pattern="^SELECT .* FOR UPDATE$"  
-        destination_hostgroup=1  
-        apply=1  
-    },  
-    {  
-        rule_id=2  
-        active=1  
-        username="root"  
-        match_pattern="^SELECT"  
-        destination_hostgroup=2  
-        apply=1  
-    },  
-    {  
-        rule_id=3  
-        active=1  
-        username="root"  
-        match_pattern="^INSERT|^UPDATE|^DELETE"  
-        destination_hostgroup=1  
-        apply=1  
-    }  
+ProxySQL 的設定是動態的 (存於 SQLite)，以下為核心概念配置 (類似 `proxysql.cnf`)：
+
+#### 1. 定義 Hostgroups (群組)
+將 DB 機器分組，例如：
+*   **HG 1 (Writer)**: 放 Master。
+*   **HG 2 (Reader)**: 放 Slaves。
+
+```cpp
+// 定義 backend servers
+mysql_servers =
+(
+    {
+        address="mysql1"
+        port=3306
+        hostgroup=1
+        max_connections=200
+    },
+    {
+        address="mysql2"
+        port=3306
+        hostgroup=1  // 備選 Writer
+        max_connections=200
+    }
 )
 ```
+
+> ProxySQL 會監控 `read_only` 變數。若 `mysql1` 變成 `read_only=ON` (變 Slave)，ProxySQL 會自動把它移出 HG 1。
+
+#### 2. 定義路由規則 (Query Rules)
+利用 Regex 決定 SQL 去哪。
+
+```cpp
+mysql_query_rules =
+(
+    {
+        // Rule 1: SELECT ... FOR UPDATE 必須去 Master (避免讀到舊資料)
+        rule_id=1
+        active=1
+        match_pattern="^SELECT .* FOR UPDATE$"
+        destination_hostgroup=1
+        apply=1
+    },
+    {
+        // Rule 2: 所有讀取 (SELECT) -> 去 HG 2 (Reader)
+        rule_id=2
+        active=1
+        match_pattern="^SELECT"
+        destination_hostgroup=2
+        apply=1
+    },
+    {
+        // Rule 3: 所有寫入 (INSERT/UPDATE/DELETE) -> 去 HG 1 (Master)
+        rule_id=3
+        active=1
+        match_pattern="^INSERT|^UPDATE|^DELETE"
+        destination_hostgroup=1
+        apply=1
+    }
+)
+```
+
+透過 Orchestrator 處理 **"Server 端"** 的 HA，加上 ProxySQL 處理 **"Client 端"** 的路由，就構成了一套完整的高可用 MySQL Cluster 架構。
 
 詳細設定可參考：https://ithelp.ithome.com.tw/articles/10381791
