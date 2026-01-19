@@ -6,16 +6,28 @@ Transaction ACID 中的 Consistency 要求資料更新前後要符合資料規�
 
 ## MySQL Schema 儲存在哪裡？
 
-8.0 前儲存在 `.frm` 檔案，**8.0 後則儲存到 system table space 的 `.idb` 並將 Schema 資料視為紀錄，能使用 Transaction 去更新**，但不論 `.firm` 還是 system table space ，Schema 資料與資料是分開儲存，好處就是省空間，不用每資料都另外儲存 Schema 資料。
+| 版本 | 儲存位置 | 特性 |
+| :--- | :--- | :--- |
+| **8.0 之前** | `.frm` 檔案 | 單純檔案儲存 |
+| **8.0 之後** | System Table Space 的 `.idb` | 將 Schema 資料視為紀錄，**能使用 Transaction 去更新** |
 
-## 既然是分開儲存，那麼更新 Schema 時，就不會去更新到資料對嗎？
+> [!NOTE]
+> 不論 `.frm` 還是 system table space，Schema 資料與資料皆是**分開儲存**。
+> **好處**：節省空間，不用每一筆資料都重複儲存 Schema 定義。
 
-答案是不一定，例如 `ALTER TABLE users ADD COLUMN count SMALLINT NOT NULL AFTER name` ，新增欄位時加了 AFTER 就需要去更新資料，而更新勢必要上鎖，就會導致 Table Lock，如果 Table 資料多，鎖的時間就會很久。
+### 既然是分開儲存，那麼更新 Schema 時，就不會去更新到資料對嗎？
+
+答案是<span style="color: orange">不一定</span>，例如:
+```sql
+ALTER TABLE users ADD COLUMN count SMALLINT NOT NULL AFTER name
+```
+
+新增欄位時加了 AFTER 就需要去更新資料，而更新勢必要上鎖，就會導致 `Table Lock`，如果 Table 資料多，鎖的時間就會很久。
 
 原因在於 Page 儲存資料的格式是 Schema 定義的，例如
 
 ```sql
-create table users (  
+CREATE TABLE users (  
 	id int auto_increment,  
 	name char(100),  
 	gender int,  
@@ -23,22 +35,34 @@ create table users (
 ); 
 ```
 
-資料格式為，`[4bytes | 100 bytes | 4 bytes]`，前 4 bytes 代表 id，中間 100 bytes 是 name ，最後 4 bytes 是 gender，如果執行 `ALTER TABLE users ADD COLUMN count SMALLINT NOT NULL AFTER name` 格式會變成 `[4bytes | 100 bytes | 2 bytes | 4 bytes]`，若 `idb` 檔案中資料沒更新，讀資料時依照新的 Schema 解析就會出錯。
+資料格式是由 Schema 定義的，以 `users` Table 為例：
+
+**修改前 (Original Schema):**
+```
+[id (4 bytes)] | [name (100 bytes)] | [gender (4 bytes)]
+```
+
+MySQL 讀取一筆 Row 預期長度為 `4 + 100 + 4 = 108 bytes`。
+
+**修改後 (After ADD COLUMN ... AFTER name):**
+```
+[id (4 bytes)] | [name (100 bytes)] | [count (2 bytes)] | [gender (4 bytes)]
+```
+Schema 變更後，預期長度變為 `4 + 100 + 2 + 4 = 110 bytes`。
+
+> [!CAUTION]
+> **問題點：**
+> 如果 `.idb` 檔案中的舊資料沒有重寫更新，MySQL 依據**新 Schema** 去讀取**舊資料**時，就會發生錯亂 (例如：讀完 `name` 後，錯誤地將 `gender` 的前 2 bytes 當作 `count` 讀取)，導致解析失敗。
 
 ## 那麼只要 ADD COLUMN 都會變動格式，都會 Lock Table 一段時間嗎？
 
-不一定！MySQL 修改 Schema 的演算法有三個，Copy & Instant & InPlace 。
+<span style="color: orange">不一定！</span> MySQL 修改 Schema 的演算法有三個，`Copy` & `Instant` & `InPlace`。
 
-- **Copy** - 建立新的 idb 檔，把舊的資料依照新的格式搬移過去，然後再刪除舊的 idb 檔，且搬移過程中要對資料上鎖，避免舊 idb 檔案被更新沒同步到新 idb 檔案。
-
-- **Instant** - 只修改 Schema 資料，Table Lock 時間很短。
-如果 ADD COLUMN 在 Schema 尾端且可為 NULL 或有 Default Value，MySQL 就會用 Instant 算法，執行會非常快，但資料格式有變，解析不會有問題嗎？
-執行 ALTER TABLE users ADD COLUMN count SMALLINT NOT NULL DEFAULT 1 ，資料格式會變成 [4bytes | 100 bytes | 4 bytes | 2 bytes ]，解析舊格式時發現資料長度不夠，可以自動補預設值，因此不更新資料也不會解析錯誤。
-因此像是 ALTER COLUMN NAME or ADD COMMENT 等不會破壞資料格式的 Migration 都會用 Instant，而修改 Data Type 跟 ADD COLUMN AFTER 等會破壞資料格式的 Migration 會用 Copy。除了 Column 調整，ADD INDEX 也是常見的 Migration，建立新的 Index 雖不會影響資料格式，但需要為每筆資料建立新的 Index Tree，因此會此用 InPace 。
-
-- **InPlace** - 不會建立新的 `.idb` 檔案，而是在原有的 `.idb` 檔案中擴展新空間塞新資料，塞完新資料後會拿 Table Lock 並更新 Schema 內容，上鎖時間不多，InPlace 透過兩個機制完成：
-    - **Background Thread** : 在背景執行將原有資料同步到新空間，例如將原有資料一筆筆建立新的 Index 。
-    - **Online Alter Log**：由於 InPlace 執行不會 Lock，因此資料會不斷被更新，會導致 Background Thread 同步完某筆資料後，該筆資料又被更新，這時需要一個機制追蹤這些後來被更新的內容，所以 MySQL 用額外的 Log 結構去儲存 Background Thread 執行過程中的所有修改內容，並在 Background Thread 執行完後重放 Log 的內容建立新的資料。
+| 演算法 | 機制說明 | 鎖定 (Lock) 特性 | 適用場景 & 備註 |
+| :--- | :--- | :--- | :--- |
+| **Copy** | 建立新的 `.idb` 檔，將舊資料依照新格式複製過去，最後刪除舊檔。 | **需對資料上鎖 (Table Lock)**<br>搬移過程中鎖定，避免資料不一致，耗時較長。 | **會破壞資料格式的變更**<br>如：修改 Data Type、`ADD COLUMN ... AFTER`。 |
+| **Instant** | 僅修改 Schema Metadata。若讀取舊資料時發現長度不足 (格式變更)，系統會自動補上預設值，無需物理重寫資料。 | **Table Lock 時間極短**<br>執行非常快。 | **不破壞資料格式**<br>如：`ALTER COLUMN NAME`、`ADD COMMENT`<br>**特定新增欄位**<br>如：`ADD COLUMN` (在 Schema 尾端且可為 NULL 或有 Default Value)。 |
+| **InPlace** | 不建立新檔，在原 `.idb` 擴展空間。<br>1. **Background Thread**: 背景同步資料 (如建立 Index)。<br>2. **Online Alter Log**: 紀錄並重放搬移期間的異動。 | **不需長時間 Lock**<br>執行過程允許讀寫，僅在最後更新 Schema 時短暫上鎖。 | **需重建結構但不強制重寫格式**<br>如：`ADD INDEX` (需為每筆資料建立新的 Index Tree)。 |
 
 其實理論上 `ADD COLUMN` 若影響資料格式也可參考 InPlace 算法實作，可惜 MySQL 會用 COPY 算法，但如果你會調整資料格式又不想 Lock Table 那麼久，可以用 **online-schema-change** 工具，其概念是 InPlace + Copy 整合，他的流程是：
 
