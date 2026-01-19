@@ -29,7 +29,7 @@
 - Master 專注於寫入，不需追蹤每個 Slave 的進度或管理推送邏輯。
 - Slave 可根據自身能力調整拉取頻率與批次大小，在資料量大時一次拉取更多資料，反而提高處理效率。
 
-而在拉取模式下，Master 要將**變更資料先寫入一個暫存區**，讓不同的 Slave 依照其進度拉取資料，而這個暫存區就是 **Binlog**！
+而在拉取模式下，<span style="color:orange">Master 要將**變更資料先寫入一個暫存區**，讓不同的 Slave 依照其進度拉取資料，而這個暫存區就是 **Binlog**</span>
 
 ## 為何需要新的儲存區？不能用 Redo Log 嗎？
 
@@ -138,70 +138,122 @@
 
 ## Slave 是怎麼同步資料進硬碟的？
 
-Slave 從 Master Binlog 拉取資料後不會馬上寫入 Redo Log，而是先同步到 Relay Log 中，原因在於：
+Slave 從 Master Binlog 拉取資料後並不會直接寫入 InnoDB (Redo Log)，而是先循序寫入到 **Relay Log** 中，這主要有兩個考量：
 
-- Relay Log 作為中繼檔案可避免每次讀取後需馬上解析並更新所帶來的延遲與風險，單純同步 Binlog 資料到 Relay Log，寫入成本低、邏輯單純，能提高拉取效能並保證系統異常後可回溯。
-- 有 Relay Log 後可將純寫入 & SQL 執行邏輯解耦，實現雙執行緒模型，Replica I/O Thread 負責拉取資料並寫入到 Relay Log，Replica SQL Thread 負責讀取 Relay Log 並寫入到 InnoDB，好處是錯誤隔離且能針對彼此情境做單獨優化。
+1.  **效能與解耦 (Decoupling)**：
+    *   **寫入成本低**：Relay Log 是邏輯日誌，同步過程僅是單純的**循序寫入 (Sequential Write)**，速度極快。若直接寫入 InnoDB，需處理 B+Tree 分裂、鎖競爭等開銷 (Random Write)，會嚴重拖慢拉取速度。
+    *   **錯誤隔離**：將「拉取」與「回放」解耦。即使 SQL 執行失敗，Relay Log 依然存在，可以修正後重試，無需重新向 Master 請求資料。
 
-說到優化，Replica I/O & SQL Thread 作為同步兩大核心，其效能會影響 Slave 同步速度，首先：
+2.  **雙執行緒模型 (Dual-Thread Model)**：
+    透過 Relay Log，MySQL 將同步工作拆解為兩個獨立的 Thread：
+    *   **Replica I/O Thread**：負責 **[拉取]**。連上 Master -> 讀取 Binlog -> 寫入 Relay Log。
+    *   **Replica SQL Thread**：負責 **[回放]**。讀取 Relay Log -> 解析 SQL -> 寫入 Storage Engine。
 
-Replica I/O Thread 負責連上 Master 後不斷拉取資料，為確保 Relay Log 順序跟 Binlog 順序一致因此無法並行處理，不過 I/O Thread 只負責同步資料，其效能瓶頸在於網路吞吐量，需要能內拉取大量資料並一次執行 `fsync` ，因此可透過 `binlog_transaction_compression` 參數壓縮 binlog 內容提高吞吐。
 
-Replica SQL Thread 需解析 Binlog 並透過 Storage Engine 寫入資料，其邏輯較複雜且耗時，需透過並行處理提高同步速度，因此 MySQL 使用了 **Multi-Threaded Replica** (a.k.a MTS) 技術。
+> [!NOTE]
+> **什麼是 Relay Log？**
+> Relay Log (中繼日誌) 是 Slave Server 上的一組日誌檔案，其格式與 Binlog 完全相同。
+> *   **儲存位置**：預設位於 Data Directory (`datadir`)，檔名格式通常為 `{hostname}-relay-bin.xxxxxx` (其中 `{hostname}` 為 Slave Server 的 OS 主機名稱)。
+> *   **生命週期**：I/O Thread 負責寫入，SQL Thread 執行完畢後會自動刪除 (Purge)，通常不需手動維護。
+> *   **內容**：包含從 Master 拉取過來的原始 Binlog Events。
 
-要並行執行 SQL 首先要確保 SQL 之間沒有依賴關係，例如：
+### 同步效能優化 (I/O Thread vs SQL Thread)
+
+Replica I/O & SQL Thread 作為同步核心，優化方向取決於其瓶頸：
+
+| 組件 (Thread) | 工作特性 | 瓶頸 (Bottleneck) | 優化策略 (Optimization) |
+| :--- | :--- | :--- | :--- |
+| **I/O Thread** | **單執行緒 (Serial)**<br>需確保順序與 Master 一致，無法平行化。 | **網路吞吐量 (Network)**<br>跨網路傳輸大量資料。 | **Binlog 壓縮** (`binlog_transaction_compression`)<br>透過 CPU 換取頻寬，減少網路傳輸量 (MySQL 8.0.20+)。 |
+| **SQL Thread** | **複雜運算 (Complex)**<br>需解析 SQL、檢查約束、更新索引。 | **CPU & Disk IOPS**<br>通常是同步延遲 (Lag) 的主因。 | <span style="color: orange">**MTS (Multi-Threaded Slave)**<br>將回放工作平行化，開啟多個 SQL Thread 同時寫入。 </span> |
+
+要啟用 **MTS (Multi-Threaded Slave)** 並行回放，核心挑戰在於 **「如何識別資料依賴 (Data Dependency)」**。若兩個 Transaction 修改同一筆資料，執行順序將決定最終結果 (Race Condition)。
+
+**1. 有依賴關係 (Dependency Exists) - 必須循序執行**
 
 ```sql
-transaction A  
-UPDATE users SET status = 2 WHERE user_id = 1;  
+--- Transaction A: 將 User 1 狀態設為 2
+UPDATE users SET status = 2 WHERE user_id = 1;
 
-transaction B  
+--- Transaction B: 將所有狀態為 2 的用戶改成 1
 UPDATE users SET status = 1 WHERE status = 2;
 ```
 
-上面案例執行順序不同，產生結果就會不相同，因此有依賴關係。
-最簡單的判斷邏輯就是不同 DB 的 Transaction 彼此絕對沒有依賴關係：
+*   **若順序為 A -> B**：User 1 最終狀態為 `1` (先變 2，隨後被 B 的條件命中變成 1)。
+*   **若順序為 B -> A**：User 1 最終狀態為 `2` (B 先執行時 User 1 非 2，不受影響；隨後 A 執行將其設為 2)。
+> [!WARNING] 
+> 由於執行順序會嚴重影響資料一致性，這類 Transaction **禁止並行 (Must be Serialized)**。
+
+**2. 無依賴關係 (Independent) - 可以並行執行**
+
+最簡單的判別方式是檢查是否跨不同資料庫 (**Per-Database**)，因為不同 DB 的資料實體是隔離的：
 
 ```sql
-transaction A   
-UPDATE db_a.users SET status = 2 WHERE user_id = 1;  
+--- Transaction A (操作 DB_A)
+UPDATE db_a.users SET status = 2 WHERE user_id = 1;
 
-transaction B  
+--- Transaction B (操作 DB_B)
 UPDATE db_b.users SET status = 1 WHERE status = 2;
 ```
 
-這也是 MySQL 5.6 引進的 **Per-Database Replication**，但實用性太低，大部分情況都是單一 DB 就需要有好的同步效能，因此 MySQL 5.7 開發了 **Logical_clock Replication**：
+*   無論誰先執行，`db_a` 與 `db_b` 的最終結果都互不影響。
+*   這類操作 **可以安全並行 (Parallel Safe)**。
 
-**其概念是 Master 並行執行了哪些 Transaction，Slave 就也可以並行處理，而 Master 實際並行執行的 Transaction 就是 Group Commit 中的Transaction**，因此 MySQL 在 Binlog 內容中加入了 Group Commit 的邊際值，而 **Logical_clock Replication** 會透過分析 Group Commit 邊際值來判斷哪些 Transaction 是可以並行執行的：
+基於上述「跨 DB 必無依賴」的邏輯，MySQL 5.6 引入了 **Per-Database Replication** (基於庫的並行複製)。
 
-![Screenshot 2026-01-06 at 20.58.36](https://hackmd.io/_uploads/BJ008K54Zx.png)
+> [!WARNING] 
+> 但此技術的致命傷在於**並行顆粒度 (Granularity) 過大**——它僅以「資料庫」為單位進行隔離：
+> *   **不同 Database** 的交易 -> **可並行**。
+> *   **同一個 Database** 的交易 -> **必須循序執行 (Serialized)**。
+> 由於現代應用架構多採 **單一資料庫 (Single Database)** 模式，這導致幾乎所有交易都擠在同一個佇列中，根本無法享受到並行加速的紅利，導致該優化實用性不足。
 
-上面 Binlog 內容的 last_committed 代表 transaction 執行時前一個完成的 transaction 序號，**因此相同時 last_committed 值的 transaction 代表是同時執行的，Logical_clock Replication 會解析該內容找出可並行處理的 transaction。**
+因此 MySQL 5.7 推出了基於 **Logical Clock** 的 **MTS (Multi-Threaded Slave)** 技術，將並行判斷的顆粒度縮小至 **Transaction** 等級：
+
+### Logical Clock Replication (MySQL 5.7+)
+
+
+> [!NOTE]
+> 
+> 只要能夠在 Master 上 [同時進入 Commit 階段] 的 Transactions，代表彼此沒有 Lock 競爭 (否則會被 Block 住)，因此在 Slave 上也可以 [並行回放]。
+
+這個機制利用了 Master 的 **Group Commit** 行為來標記並行性。具體實作上，MySQL 在 Binlog Event 中加入了兩個欄位來追蹤依賴關係：
+1.  **`sequence_number`**：交易的流水號 (遞增)。
+2.  **`last_committed`**：該交易提交時，系統中 **「最新已完成」** 的交易流水號。
+
+
+![alt text](<imgs/Screenshot 2026-01-19 at 7.55.21 PM.png>)
+
+
+**判斷依據：**
+如上圖，多筆 Transaction 若擁有**相同的 `last_committed`**，代表它們是在同一個時間區間內執行並準備提交的。這意味著：
+*   它們之間沒有鎖衝突 (Lock Contention)。
+*   Slave SQL Threads 可以安全地並行執行這些 Transaction，最後再依序 Commit。
 
 
 
 
-# MySQL 如何架設高可用的 Master-Slave 架構？(ProxySQL & Orchestrator)
+## MySQL 如何架設高可用的 Master-Slave 架構？(ProxySQL & Orchestrator)
 
-架設高可用的 MySQL Cluster 不只要讓多台 Slave 去接收 Master 的 Binlog 同步資料，還要做到當 Master Crush 時，Slave 能自動接替成為 Master 同時 Client 送出的寫入請求也能自動轉換。
+架設高可用的 MySQL Cluster 不只要讓多台 Slave 去接收 Master 的 Binlog 同步資料，還要做到當 Master **Crush** 時，Slave 能自動接替成為 Master 同時 Client 送出的寫入請求也能自動轉換。
 
 那麼要如何建立多個 Slave 去監聽 Master 的 Binlog？
 
-## 首先架設 Master & Slave 需要設定這些參數：
+### 首先架設 Master & Slave 需要設定這些參數：
 
-- server-id : 該 server 的唯一識別號，主要用於 cluster 彼此識別身份，例如 slave 在拉取 binlog 時也會記錄該 binlog 是從哪個 server-id 來的，需要額外設定而不用 ip 或者 hostname 的原因在於如果 server 更換機器 ip & hostname 是可能改變的。
-- log-bin：開啟 binlog 。
-- log-bin-basename：指令 binlog 檔名的前綴，預設是 binlog，也可以透過指定 /foldera/folderb/mybinlog 來指定 binlog 儲存路徑，可將 binlog 儲存在不同硬碟避免影響查詢寫入的硬碟效能。
-- binlog-format : 設定 binlog 格式，例如 ROW。
-- gtid-mode：使用 gtid 作為 binlog 進度追蹤。
-- enforce_gtid_consistency：確保所有寫入 Master 的指令都是 gtid-safe 也就是重複執行一定會產生一樣的值，例如 UPDATE … LIMIT 不指定 ORDER BY 就不是 gtid-safe 。
-- log_replica_updates：當 server 為 slave 時 replay master 資料後會寫入其 binlog，當 slave 升級成 master 時，可以讓其他 slave 繼續接收 binlog 資料。
-- binlog_expire_logs_seconds：binlog 檔案多久要過期，避免硬碟塞爆。
-- bind-address：設定 server 傾聽的 ip 位置，建議為 0.0.0.0 才能讓 slave 透過 public ip 連進來。
+| 參數 (Parameter) | 說明 (Description) |
+| :--- | :--- |
+| `server-id` | **Server 唯一識別碼**<br>Cluster 成員識別身份用 (避免循環複製)。需固定為唯一整數，不建議綁定 IP/Hostname。 |
+| `log-bin` | **開啟 Binlog 功能**<br>啟用後才能紀錄變更並同步給 Slave。 |
+| `log-bin-basename` | **Binlog 檔名路徑前綴** (預設 `binlog`)<br>可指定路徑 (e.g. `/log_disk/binlog`) 將 Log 存於獨立硬碟，避免與資料讀寫搶 IO。 |
+| `binlog-format` | **Binlog 紀錄格式**<br>建議設為 `ROW` 以確保資料一致性。 |
+| `gtid-mode` | **啟用 GTID 模式**<br>開啟全域交易 ID 用於追蹤同步進度 (`ON`)。 |
+| `enforce_gtid_consistency` | **強制 GTID 一致性**<br>禁止執行非 GTID-Safe 的語句 (如 `CREATE TABLE ... SELECT`)，確保同步安全性。 |
+| `log_replica_updates` | **Slave 寫入 Binlog** (舊版為 `log_slave_updates`)<br>讓 Slave 重播 Master 資料時也寫入自己的 Binlog。用於串接 (A->B->C) 或 Slave 晉升為 Master 後供其他節點同步。 |
+| `binlog_expire_logs_seconds` | **Binlog 保留時間 (秒)**<br>自動清除舊 Log，避免塞爆硬碟空間。 |
+| `bind-address` | **監聽 IP 位址**<br>設為 `0.0.0.0` 允許外部 (Slave) 連線，預設 `127.0.0.1` 只能本機連線。 |
 
 而 **Slave** 的設定跟 Master 一樣，只是多了 read-only 確保他不能處理寫入請求。
 
-```yaml!
+```yaml
 services:  
    mysql1:  
     container_name: mysql1  
@@ -266,7 +318,7 @@ networks:
 
 執行 `docker compose -f ./mysql-cluster.yaml up -d` 啟動 server 後，需要進入 slave db 設定 Master DB 連線資訊：
 
-```
+```sql
 CHANGE REPLICATION SOURCE TO  
 SOURCE_HOST = 'mysql1',  
 SOURCE_PORT = 3306,  
@@ -308,7 +360,7 @@ local_test > backup.sql
 
 為了解決這個問題需要使用 `Percona XtraBackup` 工具，其備份資料的也包含 redo log 內容，在備份完後，透過指令去 Replay redo log 內容就能讓資料更新到最新狀態。
 
-```shell!
+```shell
 # 使用 percona-xtrabackup 從 master 複製檔案到 backup folder 中  
 docker run --rm \  
 --network compose_mysql_cluster \  
@@ -338,7 +390,7 @@ xtrabackup --prepare \
 
 物理備份限制是版本跟設定要一致，避免出現對資料格式不兼容的情況，但備份速度比邏輯備份快上很多。
 
-## 架設完 Cluster 後，要如何做到自動 Auto Fail Over？
+### 架設完 Cluster 後，要如何做到自動 Auto Fail Over？
 
 [orchestrator](https://github.com/openark/orchestrator) 是一個 MySQL Cluster 管理工具，提供 GUI 管理 MySQL Server 的網路關係，並提供 Server 狀態追蹤以及 Auto Fail Over 的功能。
 
