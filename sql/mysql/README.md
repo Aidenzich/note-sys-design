@@ -12,7 +12,7 @@
 | [x] | Write Durability | [mysql-write-durability.md](./mysql-write-durability.md) | 寫入持久性機制 |
 | [x] | Schema | [mysql-schema.md](./mysql-schema.md) | Schema 設計原則 |
 | [x] | Partition | [mysql-partition.md](./mysql-partition.md) | 表分區策略 |
-| [ ] | Master-Slave | [mysql-master-slave.md](./mysql-master-slave.md) | 主從複製架構 |    
+| [x] | Master-Slave | [mysql-master-slave.md](./mysql-master-slave.md) | 主從複製架構 |    
 
 ---
 
