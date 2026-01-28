@@ -26,38 +26,10 @@ News Feed (或 Timeline) 是社交媒體的核心功能，涉及複雜的資料�
 
 ## 2. 核心問題：Push vs Pull
 
-### 2.1 Pull Model (讀取時聚合)
-
-```
-User requests Feed
-        ↓
-Query: SELECT posts FROM followees WHERE created_at > last_seen
-        ↓
-Aggregate and Sort
-        ↓
-Return Feed
-```
-
-| 優點 | 缺點 |
-|:---|:---|
-| ✅ 發布貼文即時 (O(1)) | ❌ 讀取慢 (聚合 200+ Followees) |
-| ✅ 不浪費儲存 | ❌ 高流量用戶讀取頻繁 |
-
-### 2.2 Push Model (Fan-out on Write)
-
-```
-User A posts
-        ↓
-For each follower (B, C, D, ...):
-    Insert post into follower's feed cache
-        ↓
-User B requests Feed: Return cached feed
-```
-
-| 優點 | 缺點 |
-|:---|:---|
-| ✅ 讀取極快 (預先計算) | ❌ 大 V 發布慢 (Fan-out 到百萬粉絲) |
-| ✅ 適合大多數普通用戶 | ❌ 大量儲存空間 |
+| 策略 | 機制 (Description) | 優點 (Pros) | 缺點 (Cons) |
+| :--- | :--- | :--- | :--- |
+| **Pull Model**<br>(讀取時聚合 / Fan-out on Read) | **核心概念**：除非用戶主動讀取，否則系統不執行任何聚合操作。<br><br>**流程**：<br>1. User 請求 Feed。<br>2. 系統查詢所有 Followees (關注對象) 的最新貼文 (`SELECT ... WHERE created_at > last_seen`)。<br>3. 在記憶體中進行合併排序 (Merge & Sort)。<br>4. 回傳結果。 | ✅ **發布貼文即時 (O(1))**：寫入成本極低，只需存入 DB。<br>✅ **不浪費儲存**：無需為每個粉絲維護一份 Feed List。 | ❌ **讀取延遲高**：若關注 200+ 人，需執行大量 DB 查詢與聚合計算。<br>❌ **DB 壓力大**：高流量用戶頻繁刷新會導致 DB 負載過重。 |
+| **Push Model**<br>(Fan-out on Write) | **核心概念**：將 Feed 預先計算好 (Pre-computed)，讀取時直接取用。<br><br>**流程**：<br>1. User A 發布貼文。<br>2. 系統找出所有 Followers。<br>3. 將 Post ID 寫入每個 Follower 的 Feed Cache (`feed:{follower_id}`)。<br>4. User B 讀取時，直接回傳 Cache 內容。 | ✅ **讀取極快 (O(1))**：不需要即時聚合，不僅快且保護 DB。<br>✅ **適合多讀少寫**：符合大多數社交媒體的使用模式。 | ❌ **寫入放大 (Write Amplification)**：名人發文 (e.g. 100萬粉絲) 會觸發百萬次寫入，導致「發送延遲」。<br>❌ **儲存成本高**：同一份資料被複製多份。 |
 
 ### 2.3 Hybrid Model (業界主流)
 
