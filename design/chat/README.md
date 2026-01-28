@@ -50,6 +50,13 @@
 > - **未來借用型 (The "Ring Buffer" Strategy)**: 不完全依賴當下的系統時間，而是預先生成一批 ID 放在 Ring Buffer 裡。如果發生時間回撥，它仍然可以繼續發放 Buffer 裡的 ID（因為那些 ID 的時間戳本來就是「未來」的或者已經序列化好的）。
 
 
+> [!NOTE] Production Ready 的 Snowflake 實踐
+> 在實際工程中，我們不手刻 Snowflake，而是選用成熟的 Library（如 Go 的 bwmarrin 或 Java 的 Hutool）。這些 Library 通常已內建 Busy Wait 機制來自動處理毫秒級的 NTP 回撥。
+> 工程師的職責轉向為：
+> 1. 選型：確認 Library 的回撥策略是「報錯」還是「等待」。
+> 2. 配置：在 K8s 環境下，設計 Worker ID 的自動分配機制（通常利用 Redis Incr 或 Zookeeper 協調），這才是分佈式 ID 最大的實作難點，而非算法本身。
+
+
 ### 效能優化與擴展性 (Performance & Scalability)
 
 | 問題場景 | 採用方案 | 核心技術/機制 | 優點 (Pros)     | 缺點/權衡 (Cons)    |
