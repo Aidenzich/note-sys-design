@@ -35,6 +35,21 @@
 | **訊息 ID 生成** | **Snowflake ID**   | 64-bit 整數 (時間戳 + 機器ID + 序列號)。 | **全域唯一**、**按時間排序** (對 DB 寫入友善)、佔用空間小。 | 依賴 Server 時鐘，需處理時鐘回撥 (Clock Skew) 問題。 |
 | **斷線補漏資料** | **推拉結合 (Push-Pull)** | **Cursor-based Sync**。Client 連線時帶上 `last_msg_id` 向 DB 拉取。    | **保證資料不丟失**、邏輯清晰可靠。  | Client 端需實作 Buffer 處理與即時訊息的**競態條件 (Race Condition)**。 |
 
+
+> [!NOTE] Snowflake 的時鐘回撥 (Clock Skew) 處理
+> Snowflake 演算法強依賴機器系統時間，若 NTP 校正導致時間倒退（回撥），將會導致 ID 重複。原生算法不具備自動修復能力，必須在程式碼中顯式處理：
+> 偵測機制：每次生成 ID 前，檢查 CurrentTime < LastTimestamp。
+> 
+> **自動處理策略：**
+> - 微量回撥 (e.g., < 5ms)：執行 Busy Wait (空迴圈等待)，直到系統時間追上 LastTimestamp，再繼續生成。
+> - 嚴重回撥 (e.g., > 1s)：直接 拋出異常 (Reject) 或切換至備用機器，並觸發監控告警 (Alert)，絕對禁止強行生成 ID。
+>
+> **成熟的開源 Snowflake Library 幾乎都內建了「輕微回撥」的防禦機制:**
+> - **暴力報錯型 (Strict Mode)**: 只要發現 CurrentTime < LastTime，直接 throw Exception 拒絕服務。寧可服務掛掉，也不要產生重複 ID 污染數據庫。
+> - **智慧等待型 (Smart Wait)**: 最常見如果回撥時間很短（例如 < 5ms），它會 Thread.sleep() 或 Loop 等待時間追上。如果回撥時間太長（例如 > 1s），它才會報錯。
+> - **未來借用型 (The "Ring Buffer" Strategy)**: 不完全依賴當下的系統時間，而是預先生成一批 ID 放在 Ring Buffer 裡。如果發生時間回撥，它仍然可以繼續發放 Buffer 裡的 ID（因為那些 ID 的時間戳本來就是「未來」的或者已經序列化好的）。
+
+
 ### 效能優化與擴展性 (Performance & Scalability)
 
 | 問題場景 | 採用方案 | 核心技術/機制 | 優點 (Pros)     | 缺點/權衡 (Cons)    |
