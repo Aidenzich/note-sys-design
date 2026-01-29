@@ -33,70 +33,106 @@ News Feed (或 Timeline) 是社交媒體的核心功能，涉及複雜的資料�
 
 ### 2.3 Hybrid Model (業界主流)
 
-```
-普通用戶 (< 10K Followers): Push Model
-名人/大 V (> 10K Followers): Pull Model (讀取時即時聚合)
+為了平衡 Push 與 Pull 模型的優缺點，業界（如 Instagram, Twitter/X, Weibo）通常採用 **混和模式 (Hybrid Model)**。此策略根據用戶的「影響力」（通常用粉絲數判定）來決定使用哪種分發方式。
 
-User Feed = Cached Posts (Push) + Celebrity Posts (Pull, real-time)
-```
+| 用戶類型 | 採用模型 | 粉絲數門檻 | 寫入機制 (Write Path) | 讀取機制 (Read Path) | 核心考量 (Trade-off) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **普通用戶**<br>(Normal Users) | `Push Model` | **< 10K** | **Fan-out on Write**<br>發文時，立即將 Post ID 推送到所有粉絲的 `Feed Cache`。 | **Read Cache**<br>直接從 Cache 讀取，速度極快 **(O(1))**。 | ✅ **讀取效能優先**<br>因為粉絲少，寫入放大 (Write Amplification) 成本可控。 |
+| **名人/大 V**<br>(Celebrities) | `Pull Model` | **> 10K** | **Write to DB Only**<br>僅寫入資料庫，**不**執行 Fan-out。 | **Real-time Query**<br>讀取 Feed 時即時查詢名人貼文，並與 Cache 進行 **Merge**。 | ✅ **避免寫入風暴**<br>若使用 Push 會觸發百萬次寫入 (Thundering Herd)。<br>⚠️ **增加讀取延遲**。 |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Feed Generation                        │
-│                                                            │
-│  ┌──────────────────┐    ┌──────────────────┐             │
-│  │  Feed Cache      │ +  │ Celebrity Posts  │             │
-│  │  (Pre-generated) │    │ (Real-time Query)│             │
-│  └────────┬─────────┘    └────────┬─────────┘             │
-│           │                       │                        │
-│           └───────────┬───────────┘                        │
-│                       ▼                                    │
-│              Merge & Rank                                  │
-│                       ↓                                    │
-│              Return Feed                                   │
-└─────────────────────────────────────────────────────────────┘
+**核心公式**：
+$$
+\text{User Feed} = \text{Cached Posts} ( \text{from Normal Users}) +  Real-time Query (from Celebrities)
+$$
+
+```mermaid
+graph TD
+    subgraph Feed_Generation ["Feed Generation"]
+        direction TB
+        FC["Feed Cache<br>(Pre-generated)"]
+        CP["Celebrity Posts<br>(Real-time Query)"]
+        MR["Merge & Rank"]
+        RF["Return Feed"]
+
+        FC --> MR
+        CP --> MR
+        MR --> RF
+    end
 ```
 
 ---
 
-## 3. 高層架構
+## 3. High Level Architecture
+```mermaid
+graph TD
+    Client["Web / App"] --> Gateway["API Gateway"]
+    Client -.-> CDN["CDN (Media)"]
 
+    subgraph Services ["Micro Services Layer"]
+        direction TB
+        PostSvc["Post Service<br>(Write)"]
+        FeedSvc["Feed Service<br>(Read/Aggregate)"]
+        UserSvc["User Service<br>(Social Graph)"]
+        RankSvc["Ranking Service<br>(ML Model)"]
+    end
+
+    Gateway --> PostSvc
+    Gateway --> FeedSvc
+    Gateway --> UserSvc
+
+    subgraph MsgQueue ["Message Queue"]
+        Kafka{"Kafka"}
+    end
+
+    subgraph Workers ["Async Workers"]
+        Fanout["Fan-out Workers"]
+    end
+
+    subgraph Data ["Data Storage Layer"]
+        direction TB
+        PostDB[("Post DB<br>Cassandra")]
+        FeedCache[("Feed Cache<br>Redis")]
+        GraphDB[("Graph DB<br>Neo4j/SQL")]
+        ObjStore[("Object Store<br>S3/GCS")]
+    end
+
+    %% Service Dependencies
+    UserSvc -.-> GraphDB
+    PostSvc -.-> ObjStore
+    FeedSvc -.-> RankSvc
+
+    %% Write Flow
+    PostSvc -->|"1. Write Meta"| PostDB
+    PostSvc -->|"1.1 Upload Media"| ObjStore
+    PostSvc -->|"2. Event"| Kafka
+    Kafka -->|"Consume"| Fanout
+    Fanout -.->|"3. Get Followers"| UserSvc
+    Fanout -->|"4. Push - Normal"| FeedCache
+
+    %% Read Flow
+    FeedSvc -.->|"1. Get Followees"| UserSvc
+    FeedSvc -->|"2. Query Cache (IDs)"| FeedCache
+    FeedSvc -.->|"3. Query Celebrity (IDs)"| PostDB
+    FeedSvc -.->|"4. Hydrate Content"| PostDB
 ```
-                                 ┌─────────────┐
-                                 │   Web/App   │
-                                 └──────┬──────┘
-                                        │
-                                 ┌──────▼──────┐
-                                 │ API Gateway │
-                                 └──────┬──────┘
-                                        │
-              ┌─────────────────────────┼─────────────────────────┐
-              │                         │                         │
-       ┌──────▼──────┐          ┌───────▼──────┐          ┌──────▼──────┐
-       │ Post Service│          │ Feed Service │          │ User Service│
-       │  (Write)    │          │  (Read)      │          │             │
-       └──────┬──────┘          └───────┬──────┘          └─────────────┘
-              │                         │
-              │                         └─────────────┐
-              ▼                                       ▼
-       ┌────────────┐                          ┌────────────┐
-       │   Kafka    │                          │ Feed Cache │
-       │            │                          │  (Redis)   │
-       └─────┬──────┘                          └────────────┘
-             │
-     ┌───────┴───────┐
-     ▼               ▼
-┌─────────┐   ┌─────────┐
-│ Fan-out │   │ Post DB │
-│ Workers │   │(Cassandra)│
-└────┬────┘   └─────────┘
-     │
-     ▼
-┌────────────┐
-│ Feed Cache │
-│  (Redis)   │
-└────────────┘
-```
+1.  **User Service / Graph DB**: 
+    *   **Fan-out Workers** 必須呼叫 User Service (或查詢 Graph DB) 取得貼文作者的粉絲名單 (Followers)，才能進行推送。
+    *   **Feed Service** 必須呼叫 User Service 取得用戶的關注對象 (Followees) 列表，並區分哪些是「名人」以便進行混合查詢。
+2.  **Hybrid Model 流程**:
+    *   **Write Path**: Fan-out Worker 僅針對「普通用戶」的粉絲進行 Cache 推送 (Push)。對於名人貼文，Worker 會停止推送 (或僅更新 Celebrity timeline)，避免寫入放大。
+    *   **Read Path**: Feed Service 同時讀取 Feed Cache (普通用戶動態) 與 Post DB (名人動態)，並在記憶體中進行合併 (Merge)。
+
+**架構流程說明:**
+
+1.  **用戶請求**: 用戶透過 **API Gateway** 存取服務，媒體資源 (圖片/影片) 則直接透過 **CDN** 讀取以降低延遲。
+2.  **發文流程 (Write Path)**:
+    *   **Post Service**: 接收發文請求，將媒體檔案上傳至 **Object Store (S3)**，並將 Metadata 寫入 **Post DB** (Cassandra)。
+    *   **Kafka**: Post Service 發送「新貼文事件」至 Kafka，解耦後續處理。
+    *   **Fan-out Workers**: 消費 Kafka 訊息，查詢粉絲名單，並將貼文 ID 推送至粉絲的 **Feed Cache** (Redis)。
+3.  **讀取流程 (Read Path)**:
+    *   **可以 ID-Only**: 為了節省記憶體，Feed Cache 通常只儲存 `post_id`。
+    *   **Merge & Rank**: Feed Service 從 Cache 和 DB 撈出 IDs，交由 **Ranking Service** 進行排序（或簡單的時間排序）。
+    *   **Hydration (填充)**: 排序完成後，針對最終的 Top N 筆 ID，批量查詢 Post DB 獲取完整內容 (Content, User Info)，過濾已刪除貼文，最後回傳給 Client。
 
 ---
 
@@ -109,7 +145,7 @@ CREATE TABLE posts (
     user_id BIGINT,
     post_id BIGINT,  -- Snowflake ID (時間排序)
     content TEXT,
-    media_urls LIST<TEXT>,
+    media_keys LIST<TEXT>, -- 指向 Object Store (S3) 的 Keys
     created_at TIMESTAMP,
     like_count BIGINT,
     comment_count BIGINT,
@@ -193,22 +229,39 @@ def fanout_worker(message):
 
 ```python
 def get_feed(user_id, cursor=None, limit=20):
-    # 1. 從 Cache 取得預生成 Feed
-    cached_posts = redis.zrevrange(f"feed:{user_id}", 0, limit)
+    # 1. [IDs] 從 Cache 取得候選 Post IDs
+    cached_ids = redis.zrevrange(f"feed:{user_id}", 0, limit * 2) # 多取一點以免被過濾
     
-    # 2. 取得追蹤的大 V 最新貼文
+    # 2. [IDs] 取得追蹤的大 V 最新貼文 IDs
     celebrity_followees = get_celebrity_followees(user_id)
-    celebrity_posts = []
-    for celebrity_id in celebrity_followees:
-        posts = post_db.query(user_id=celebrity_id, limit=5)
-        celebrity_posts.extend(posts)
+    celebrity_ids = []
+    for celeb_id in celebrity_followees:
+        ids = post_db.get_recent_ids(user_id=celeb_id, limit=5)
+        celebrity_ids.extend(ids)
     
-    # 3. 合併並排序
-    all_posts = merge_and_rank(cached_posts, celebrity_posts)
+    # 3. [IDs] Merge & Rank (僅排序 ID)
+    ranked_ids = merge_and_rank(cached_ids, celebrity_ids)
     
-    # 4. 分頁 (Cursor-based)
-    return paginate(all_posts, cursor, limit)
+    # 4. [Content] Hydration (填充內容)
+    # 批量查詢 Post DB (或 Post Cache) 獲取完整內容
+    posts = post_service.multi_get_posts(ranked_ids[:limit])
+    
+    # 5. 過濾已刪除或無效貼文
+    valid_posts = [p for p in posts if p and not p.is_deleted]
+    
+    # 6. Pagination (Cursor-based using timestamp)
+    return paginate(valid_posts, cursor)
 ```
+
+### 6.1 分頁策略 (Pagination)
+*   **為什麼不使用 Offset?** (`SELECT * FROM table LIMIT 10 OFFSET 1000`)
+    *   **效能問題**: Offset 越大，DB 掃描越慢。
+    *   **資料不一致**: 在讀取過程中若有新貼文插入，Offset 會導致讀取到重複的貼文 (Shift problem)。
+*   **Cursor-based Solution**:
+    *   使用 `(timestamp, post_id)` 作為 Cursor。
+    *   Client 記錄最後一則貼文的 Cursor。
+    *   Next Request: `SELECT * ... WHERE (timestamp, post_id) < (last_timestamp, last_post_id) LIMIT 10`.
+    *   Redis `ZREVRANGEBYSCORE` 或 Cassandra Clustering Key 天然支援此查詢。
 
 ---
 
@@ -216,18 +269,20 @@ def get_feed(user_id, cursor=None, limit=20):
 
 ### 7.1 時間順序 (Chronological)
 
-```
-Score = Post Timestamp
-```
+$$
+\text{Score} = \text{Post Timestamp}
+$$
 - ✅ 公平、透明
 - ❌ 垃圾/不相關內容充斥
 
 ### 7.2 參與度排序 (Engagement-based)
 
-```
-Score = (Likes × 1) + (Comments × 3) + (Shares × 5) + (TimDecay)
-TimDecay = 1 / (1 + hours_since_post^1.5)
-```
+$$
+\begin{aligned}
+\text{Score} &= (\text{Likes} \times 1) + (\text{Comments} \times 3) + (\text{Shares} \times 5) + (\text{TimDecay}) \\
+\text{TimDecay} &= \frac{1}{1 + \text{hours\_since\_post}^{1.5}}
+\end{aligned}
+$$
 
 ### 7.3 機器學習排序 (ML Ranking)
 
@@ -240,6 +295,9 @@ Features:
 
 Model: LightGBM / Deep Neural Network
 Output: 預測用戶參與機率
+
+> **Note**: 由於 ML Ranking 計算成本高，通常會拆分為獨立的 **Ranking Service**。
+> Workflow: Feed Service 傳送候選 IDs -> Ranking Service 計算分數 -> 回傳排序後的 IDs。
 ```
 
 ---
@@ -293,6 +351,29 @@ def on_unfollow(user_id, unfollowed_id):
     for post_id in posts_to_remove:
         redis.zrem(f"feed:{user_id}", post_id)
 ```
+
+### 9.3 不活躍用戶優化 (Inactive Users)
+*   **問題**: 若用戶 30 天未登入，Fan-out worker 仍持續寫入其 Redis Cache，浪費記憶體。
+*   **解法**: 設定 **TTL (Time-To-Live)**。
+    *   Redis Key 設定 Expiration (e.g. 7天)。
+    *   若用戶 7 天沒上線，Cache 自動清空。
+    *   **Fallback**: 當用戶因為 TTL 被清空後再次登入，觸發 **Cache Miss** 流程 (見 9.4)。
+
+### 9.4 Cache Miss / Cold Start
+*   **情境**: 新用戶註冊、或不活躍用戶回歸 (Cache 已過期)。
+*   **流程**:
+    1.  讀取 `feed:{user_id}` 發現是空的 (Miss)。
+    2.  系統降級為 **Pull Model** (Synchronous Fallback)。
+    3.  即時查詢最近 N 天關注對象的貼文。
+    4.  計算 Merge & Rank。
+    5.  回傳結果給用戶，並**非同步 (Async)** 回填 (Hydrate) 到 Redis Cache，以加速下次讀取。
+
+### 9.5 刪除處理 (Deletions)
+*   **策略**: **Don't delete from Feed Cache immediately.**
+    *   用戶刪除貼文時，只在 DB 標記 `is_deleted = true`。
+    *   不主動遍歷幾萬個粉絲的 Redis List 去移除 ID (太昂貴)。
+    *   **Read Time Filter**: 在 **Hydration** 階段 (4.3 節)，讀取代碼檢查 `is_deleted` 狀態，若為 true 則丟棄該 ID。
+    *   (Optional) Async Cleanup: 另外的 Worker 會定期清理或在讀取時順便從 Cache 移除無效 ID。
 
 ---
 
