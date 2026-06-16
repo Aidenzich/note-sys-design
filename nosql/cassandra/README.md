@@ -1,10 +1,10 @@
 # Apache Cassandra 深度解析
 
-Cassandra 是一個無主節點 (Masterless)、對等架構 (P2P)、高可用且可線性擴展的寬列儲存 (Wide-column Store) 資料庫，最初由 Facebook 開發。
+Cassandra 是一個無主節點 (Masterless)、對等架構 (P2P)、高可用且可線性擴展的寬列儲存 <mark> (Wide-column Store) </mark> 資料庫，最初由 Facebook 開發。
 
 ## 1. 核心架構
 
-### 1.1 Gossip Protocol (八卦協定)
+### <span style="color:red"> 1.1 Gossip Protocol (八卦協定) </span>
 
 Cassandra 沒有 Master 節點，所有節點都是平等的。
 - 節點間透過 Gossip 協定每秒交換狀態資訊
