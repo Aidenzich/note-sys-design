@@ -55,7 +55,19 @@ Elasticsearch (ES) 是一個基於 Apache Lucene (/ˈlu.sin/) 打造的分散式
 * 因為不可變性，每次記憶體緩衝區滿了就會生成一個新的小 Segment。搜尋時必須掃描所有 Segment 再合併結果，Segment 越多越慢。因此，ES 背景會有執行緒自動將小 Segment 合併成大 Segment，並在此時**真正物理刪除**被標示為 `.del` 的資料。
 * **生產陷阱：** 大量寫入時，Segment Merging 會引發嚴重的 Disk I/O 飽和 (寫入放大)。實務上，在大批量匯入資料時，通常會暫時關閉 `refresh_interval`，避免提早生成過多小 Segment。
 
-### 3. 列式儲存：Doc Values 解決 OOM 問題
+### 3. LSM Tree 的設計思想
+LSM Tree 是一種為「高寫入吞吐量」設計的資料結構，常見於 Cassandra、RocksDB、HBase 等系統。它的核心思路是：寫入時先進入記憶體緩衝區（MemTable），而不是直接修改磁碟上的既有資料；當緩衝區滿了，再批次刷寫成磁碟上的不可變檔案。
+
+### 4. 與 Elasticsearch / Lucene 機制的關聯
+Lucene 不一定會直接用 LSM Tree 來描述自己，但它的 Segment 設計和 LSM Tree 的核心精神非常接近：
+
+* **不可變性 (Immutability)：** Segment 一旦寫入磁碟就不再修改。新的資料會先累積在記憶體中，之後再形成新的 Segment，這和 LSM Tree 將 MemTable 刷寫成不可變檔案的概念一致。
+* **追加寫入與軟刪除 (Append-only & Soft Delete)：** 刪除資料時，Lucene 不會直接改掉原始 Segment，而是透過 `.del` 檔案標記刪除；更新則是「標記舊版刪除 + 寫入新版」。這和 LSM Tree 透過 Tombstone 處理刪除、避免原地修改資料的思路相同。
+* **背景合併 (Compaction / Segment Merging)：** Segment 變多會拖慢搜尋，因此 Lucene 會在背景將小 Segment 合併成大 Segment，並在合併時真正清掉已刪除的資料。這對應到 LSM Tree 的 Compaction 機制。
+
+總結來說，Elasticsearch 依賴的 Lucene 儲存引擎，本質上是透過「不可變 Segment + 背景合併」來換取高寫入效能，這和 LSM Tree 的設計取捨高度相似。
+
+### 5. 列式儲存：Doc Values 解決 OOM 問題
 * 倒排索引很適合「搜尋」，但面對「排序 (Sort)」或「聚合 (Aggregation)」時卻是一場災難，因為引擎必須把所有的倒排資料反向載入記憶體 (過去稱為 Fielddata)，這經常導致 JVM Heap 被撐爆 (OOM)。
 * **解決方案：** 引入 `doc_values`。這是一種在建立索引時就一併計算好的**磁碟列式儲存結構**。它將負擔從 JVM Heap 轉移到 OS Filesystem Cache，利用作業系統管理記憶體，既保持了接近記憶體的讀取速度，又避免了 Java 垃圾回收 (GC) 的停頓噩夢。
 
