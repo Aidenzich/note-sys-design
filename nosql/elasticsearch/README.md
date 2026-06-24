@@ -71,6 +71,8 @@ Lucene 不一定會直接用 LSM Tree 來描述自己，但它的 Segment 設計
 * 倒排索引很適合「搜尋」，但面對「排序 (Sort)」或「聚合 (Aggregation)」時卻是一場災難，因為引擎必須把所有的倒排資料反向載入記憶體 (過去稱為 Fielddata)，這經常導致 JVM Heap 被撐爆 (OOM)。
 * **解決方案：** 引入 `doc_values`。這是一種在建立索引時就一併計算好的**磁碟列式儲存結構**。它將負擔從 JVM Heap 轉移到 OS Filesystem Cache，利用作業系統管理記憶體，既保持了接近記憶體的讀取速度，又避免了 Java 垃圾回收 (GC) 的停頓噩夢。
 
+延伸比較：[Wide Column vs Elasticsearch Doc Values](../wide-column-vs-doc-values/README.md)。兩者都可以用 Key-Value 排列方向理解，但 Wide Column 以 Row / Partition 為中心，Doc Values 則以 Field / Column 為中心。
+
 ---
 
 ## 四、 文本分析與精準度陷阱 (Analysis & Query Semantics)
