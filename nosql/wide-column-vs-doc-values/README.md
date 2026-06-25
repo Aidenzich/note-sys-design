@@ -100,34 +100,28 @@ Doc3 -> age = missing
 
 Wide Column 名字裡有 Column，但它不是 Snowflake、ClickHouse、Parquet 那種分析型 columnar database。它的核心仍然是根據 Partition Key / Clustering Key 讀寫一段資料。
 
-適合：
-
-- 查某個 conversation 的最新訊息。
-- 查某個 device 某天的時間序列資料。
-- 寫入大量 event / log / activity record。
-
-不適合：
-
-- 對所有使用者的 `age` 算平均。
-- 任意欄位 ad-hoc aggregation。
-- 大量跨 partition scan。
+| 判斷 | 場景 | 原因 |
+| --- | --- | --- |
+| 適合 | 查某個 conversation 的最新訊息 | 可以用 `conversation_id` 當 Partition Key，再用 `message_id` 或時間作為 Clustering Key 排序掃描 |
+| 適合 | 查某個 device 某天的時間序列資料 | 可以用 `(device_id, date)` 控制 Partition 大小，再依 `timestamp` 做範圍查詢 |
+| 適合 | 寫入大量 event / log / activity record | LSM Tree / append-only 寫入路徑適合高吞吐寫入 |
+| 不適合 | 對所有使用者的 `age` 算平均 | 需要跨大量 Partition 掃描，不是 Wide Column 的強項 |
+| 不適合 | 任意欄位 ad-hoc aggregation | 表是 query-driven，需要事先依查詢模式設計 Key |
+| 不適合 | 大量跨 partition scan | 容易造成 scatter-gather，延遲與資源消耗不穩 |
 
 ### Doc Values 不是主要搜尋索引
 
 Doc Values 是為排序、聚合、script 與部分欄位存取設計的 columnar data structure。全文搜尋仍主要依賴倒排索引。
 
-適合：
-
-- `ORDER BY timestamp`
-- `terms aggregation by status`
-- `avg(price)`
-- script 讀取欄位值
-
-不適合取代：
-
-- full-text search
-- BM25 scoring
-- analyzer/tokenizer 建出的 inverted index
+| 判斷 | 場景 | 原因 |
+| --- | --- | --- |
+| 適合 | `ORDER BY timestamp` | 可以順著 `timestamp` 欄位的 Doc Values 讀取每個 doc 的排序值 |
+| 適合 | `terms aggregation by status` | 可以掃描 `status` 欄位值並累計 bucket |
+| 適合 | `avg(price)` | 同一欄位通常型別一致，適合 columnar encoding 與數值聚合 |
+| 適合 | script 讀取欄位值 | script 可以從 Doc Values 取欄位值，避免載入整份 `_source` |
+| 不適合取代 | full-text search | 全文搜尋需要 analyzer/tokenizer 與 inverted index |
+| 不適合取代 | BM25 scoring | 相關性評分依賴 term frequency、document frequency 等倒排索引資訊 |
+| 不適合取代 | analyzer/tokenizer 建出的 inverted index | Doc Values 儲存欄位值，不負責斷詞與 term-to-doc 查找 |
 
 ---
 
