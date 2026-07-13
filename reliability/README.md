@@ -2,6 +2,8 @@
 
 在分散式系統中，網路不穩定和服務故障是常態。本章節涵蓋保護系統彈性的核心模式。
 
+延伸閱讀：[Synthetic Monitoring 告警設計：從單次失敗到 M-of-N 與 SLO Burn Rate](alerting/README.md)
+
 ## 1. Circuit Breaker (熔斷器)
 
 ### 1.1 概念
