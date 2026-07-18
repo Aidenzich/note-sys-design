@@ -1,278 +1,333 @@
 # 線上協作文件編輯器三系統深度設計比較:Google Docs vs Confluence vs Notion
 
-> 來源:2026-07-18 的 read-only 調查(所有外部引文擷取日期 = 2026-07-18;皆為一手優先)。逐字引文 + URL 收錄於文末 Evidence Appendix,正文以 `[A#]` 錨點回指。
-> 姊妹篇:[Google Docs vs Confluence 雙系統版](./README.md)(較精簡;本篇為獨立重新取證的三系統版,多了 Notion 與更完整的反證彙整)。
+> 來源:2026-07-19 的 read-only 調查(獨立重新取證)。所有外部主張皆附 URL + 逐字引文 + 擷取日期。
+> 姊妹篇:[Google Docs vs Confluence 雙系統版](./README.md)(較精簡的入門版)。
+> 證據等級標記:**FACT**(一手來源逐字佐證)/ **INFERENCE**(推論,弱佐證)/ **UNKNOWN**(官方未揭露,附 closure recipe)。
+> 承重的原始證據(逐字引文、來源清單)下沉到 Appendix,本文以 〔GD-n〕/〔CF-n〕/〔NT-n〕錨點回指(錨點只承載出處,句子不讀它也通順)。
 
 ---
 
-## 0. 一句話結論(先給答案)
+## TL;DR(先給答案)
 
-三個系統名義上都是「多人協作文件」,但**文件模型(document model)決定了協作演算法,三者其實站在三個不同的架構象限**:
+三個系統看起來都是「多人一起編一份文件」,但**文件模型(document model)決定了一切下游取捨**——存哪種資料庫、能不能字元級即時協作、能不能離線、怎麼分片。一句話定位:
 
-- **Google Docs = 字元級即時協作的標竿。** 文件本體就是一條**append-only 的操作日誌(op log,官方稱 revision log)**,靠 **OT(Operational Transformation,操作轉換)**在中央伺服器做字元級(character-by-character)合併。這是三者中唯一、且由官方一手文件明確證實的「真・即時字元級協作」。`[A1][A2]`
-- **Notion = block 樹 + Postgres 分片的工作區。** 文件是**一棵 block(區塊)樹**,每個 block 是 PostgreSQL 裡的一列(row);線上編輯是「**operations 打包成 transaction 交給伺服器整批 commit/reject**」的模型,官方**從未宣稱線上用 OT 或 CRDT**;CRDT(Conflict-free Replicated Data Type,無衝突複製資料型別)只在 2025-12 上線的**離線(offline)**路徑用到。其最硬的一手素材是公開的 **Postgres 分片史(480 邏輯分片、32→96 台實例)**。`[A7][A8][A9][A11]`
-- **Confluence = 企業 wiki,DB 存整份 XHTML blob。** Server/Data Center 版把整頁內容當一份 **XHTML-based「storage format」字串**存進關聯式資料庫(BODYCONTENT 表),版本歷史是**每次編輯存一份完整新版本**;即時協作由獨立服務 **Synchrony** 提供,走 **WebSocket(失敗退回 XHR)**——但**「Synchrony 用 OT」這件事,Atlassian 一手文件並未寫明**,只能標 UNKNOWN。`[A12][A13][A14][A16][A17]`
+- **Google Docs = 字元級 op log + Operational Transformation(OT)的即時協作標竿。** 文件本質是一串「變更操作(operation)」的 append-only 日誌;協作用 OT(Jupiter client-server 模型)把並發操作互相變換到收斂;可見到「逐字」即時更新與彩色游標;支援離線。代價是後端儲存細節官方幾乎全不公開(UNKNOWN)。〔GD-2〕〔GD-4〕〔GD-6〕
+- **Confluence = 傳統關聯式資料庫(RDBMS)存整段 XHTML 字串 + Synchrony 中央權威 rebase 協作。** 頁面正文是一大段 XHTML/XML 字串,存在關聯式資料庫的 `BODYCONTENT` 文字欄位;協作靠 Synchrony 微服務(WebSocket、telepointer 游標),機制是**伺服器仲裁的 edit-script/rebase**(OT 家族,**明確不是 CRDT(Conflict-free Replicated Data Type,無衝突複製資料型別 —— 免中央仲裁即可合併的資料結構)**),但 Atlassian 官方從不用「OT」或「CRDT」這兩個詞自稱。全文檢索用 Lucene。不支援離線編輯。〔CF-2〕〔CF-3〕〔CF-9〕〔CF-11〕
+- **Notion = 一切皆 block、以指標串成樹、存分片 Postgres;線上是 operation→transaction、離線才明確用 CRDT。** 每個東西(文字、圖、頁面本身)都是一筆 block 記錄,頁面是靠 `content`(子 block id 陣列)與 `parent` 指標組出來的樹;編輯是「operation 批次成 transaction 由伺服器整組 commit/reject」;**離線頁面**才被明確遷移到 **CRDT** 做衝突解決。資料庫是 workspace 分片的 Postgres(480 邏輯分片、32→96 台實體機)。搜尋用 Elasticsearch。〔NT-1〕〔NT-5〕〔NT-8〕〔NT-6〕
 
-**一句話取捨定位:** Google Docs 為「即時字元級」把整個儲存模型改成 op log 並吃下 OT 的複雜度;Notion 為「靈活的 block 工作區 + 巨量擴展」選了 block-per-row + 分片,協作精緻度退到 record/block 級整批交易;Confluence 為「企業自管、相容既有 DB」把文件當 blob 存進傳統 RDBMS,即時協作是後來(2016 Confluence 6.0)才用外掛服務 Synchrony 補上的能力層。
-
-> **可信度分層提醒:** Google Docs 的協作演算法、Notion 的資料模型與分片數字、Confluence 的儲存/搜尋引擎都是**一手 FACT**;而三者的「內部資料庫選型/快取/搜尋引擎/傳輸協定」有相當一部分官方**從未公開**,本文一律標 **UNKNOWN + closure recipe**,不以二手部落格冒充事實。特別是網路盛傳的「Notion 用 CRDT 做即時協作」「Confluence Synchrony 是 OT」兩則,經反證後**都不是一手來源可證的**——詳見 §6。
+**最大 caveat:** 三家「揭露程度」極不對稱。Google 公開了協作演算法理論(OT/Jupiter)卻幾乎不談儲存;Notion 公開了儲存/分片一手好料卻**極少談線上協作演算法**(除了離線 CRDT);Confluence 的協作演算法官方**從未指名**,只能靠一份 Atlassian 專利與 ProseMirror 編輯器旁證。凡官方未公開者本文一律標 UNKNOWN,不為了三欄對稱而美化任何一格。
 
 ---
 
-## 1. 定義問題(Define the Problem)
+## 1. Introduction(引言:目的、問題、面向)
 
-### 1.1 這份 spike 為什麼要做
+### 1.1 這份 spike 的目的(Purpose)
 
-「線上協作文件編輯器」是系統設計面試與真實架構裡的經典題:同一份文件、多人同時改、還要即時看到彼此的游標與字元。但市面上被歸為同一類的三個代表產品——**Google Docs**(消費級即時協作標竿)、**Confluence**(企業 wiki)、**Notion**(block 式工作區)——在**儲存**與**協作**兩大面向的內部設計其實差異巨大。本 spike 要做的不是列功能,而是**像一份系統設計深度解析**:先立「這類系統該怎麼比」的設計面向(rubric,評比量尺),再逐系統用一手證據舉證,最後建三欄比較表並回答「三者在架構取捨上各站在什麼位置、為什麼」。
+把三個代表性的線上協作文件/wiki 系統攤開做**深度設計解析與比較**,像一份系統設計面試等級的架構解讀:不是列功能,而是**回答「三者在架構取捨上各站在什麼位置、為什麼」**,並讓讀者理解「文件模型 → 協作演算法 → 儲存/擴展」這條因果鏈。三個對象各自代表一種典型路線:
 
-### 1.2 要回答的具體問題
+- **Google Docs** — 消費級即時協作標竿(character-level real-time)。
+- **Confluence** — 企業 wiki(RDBMS-backed、macro 生態、後進場的即時協作)。
+- **Notion** — block 式工作區(把「文件」與「資料庫」統一成 block)。
 
-1. **儲存(Storage):** 文件存進哪種資料庫?文件模型是整份 blob、操作日誌 op log、block 樹、還是字元序列?快取怎麼用?二進位(圖片/附件)是否與文字分離、是否放 object storage(如 S3)?全文檢索 FTS(Full-Text Search)用什麼引擎、怎麼建索引?
-2. **協作(Collaboration):** 多人同編用什麼演算法/協定(OT、CRDT、鎖、存檔式 / last-write-wins)?粒度是字元級、區塊級還是整頁級?即時傳輸走 WebSocket、long-poll、SSE 還是純 REST?前端如何呈現多人同編(presence/游標、即時更新、還是存檔後才見)?衝突怎麼解?
-3. **其他考題(酌情):** 版本歷史/diff/回溯、離線編輯與同步、擴展性(sharding)、以及「文件模型如何決定協作演算法」這條主線。
+### 1.2 要回答的具體問題(Questions)
 
-### 1.3 調查沿哪些面向展開(dimensions)
+1. 每個系統的**文件模型**是什麼(整份 blob / 操作日誌 op log / block 樹 / 字元序列 / XHTML 字串)?存進哪種資料庫?文字與二進位如何分離?全文檢索用什麼?
+2. **多人同編**用什麼演算法/協定(OT、CRDT、鎖、save-based、中央 rebase)?粒度是字元、區塊還是整頁?即時傳輸層是什麼?前端如何呈現多人同時編輯、衝突怎麼解?
+3. **版本歷史、離線、權限、擴展性(分片)**各是什麼取捨?最終:**文件模型如何決定協作演算法與擴展路線?**
 
-下表是本文從頭到尾使用的評比面向;每一項在 §4 三欄表中都有對應欄位。
+### 1.3 調查涵蓋的面向(Dimensions)
 
-| 面向 | 具體子問題 |
-|---|---|
-| **D1 文件模型** | blob / op log / block 樹 / 字元序列?current content 如何得出? |
-| **D2 資料庫** | 哪種 DB?一列存什麼? |
-| **D3 二進位/物件儲存** | 圖片附件放哪?是否與文字分離、是否 S3? |
-| **D4 全文檢索 FTS** | 什麼引擎?怎麼索引? |
-| **D5 版本/歷史** | 全版本快照 vs 差異 diff vs op log 重放? |
-| **D6 協作演算法** | OT / CRDT / 鎖 / 存檔式 / 整批交易? |
-| **D7 協作粒度** | 字元級 / 區塊級 / 整頁級? |
-| **D8 即時傳輸** | WebSocket / long-poll / SSE / REST? |
-| **D9 呈現與衝突** | presence/游標?即時 vs 存檔後?衝突如何解? |
-| **D10 擴展性** | 分片 sharding?如何擴? |
+儲存(資料庫、文件模型、快取、物件儲存、全文檢索)、協作(演算法、粒度、傳輸、臨場感/游標、衝突解決)、以及其他(版本歷史、離線、權限、擴展/分片)。完整量尺見 §3。
 
 ---
 
-## 2. 先教再用:名詞與文件模型 Primer
+## 2. Prerequisites(前置知識:先教再用)
 
-比較開始前,先把後面論證會靠的結構性概念用**最小具體實例**講清楚。這一節的概念都在 §4 的表格與 §6 的論證中被使用,故放在前面。
+以下是後文論證會反覆倚賴的名詞與**結構性概念**。承重的結構性概念都附最小可寫實例(fenced code block),先教一次,後面才用。
 
-### 2.1 四種文件模型(document model)
+### 2.1 文件模型的四種形狀(Document model)
 
-「文件在資料庫裡長什麼樣」有四種典型形狀,是本文最核心的分類軸:
+「文件在資料庫裡長什麼樣」有幾種截然不同的做法,這是全篇最重要的分野:
 
-**(a) 整份 blob(whole-blob)** — 一份文件 = 一大串文字/標記,整包存進一個欄位或檔案。取一個版本就取整包。**Confluence Server/DC 屬此類**:整頁是一份 XHTML(Extensible HyperText Markup Language,XML 家族的標記語言)字串,叫「storage format(儲存格式)」。長這樣:
+**(a) 整份 blob(whole-document blob)** — 把整份文件當一個大字串/大物件存一欄。編輯=覆寫整段。最簡單,但兩人同時改就會互相蓋掉。Confluence 的頁面正文接近這型(一段 XHTML 字串)。
 
-```xml
-<!-- Confluence storage format:整頁 body 就是一份 XHTML/XML 字串,整包存進 BODYCONTENT 表的一列 -->
-<p>Hello <strong>world</strong></p>
-<ac:structured-macro ac:name="info">
-  <ac:rich-text-body><p>注意事項</p></ac:rich-text-body>
-</ac:structured-macro>
-```
-編輯 = 讀出整份字串、改、寫回一份新版本字串。`[A12]`
-
-**(b) 操作日誌 op log(operation log)** — 文件本體**不是**當前文字,而是「一連串改動(操作)」的**append-only 清單**;「當前內容」是把 log**從頭重放(replay)**算出來的。**Google Docs 屬此類**,官方稱 revision log。最小實例:打「Hi」再退格刪掉「i」,op log 是:
+**(b) 操作日誌 / op log(operation log)** — 不存「現在的內容」,而存「一連串變更操作」,current content = 從空白重放(replay)所有 op。這是即時協作的關鍵地基。以打「Hi」再退格刪掉「i」為例,op log 長這樣:
 
 ```jsonc
-// Google Docs revision log(示意):文件 = 一串按時間排序的改動,不是當前字串本身
-{ "InsertText": "H", "at": 1 }   // 位置 1 插入 H      → 內容 "H"
-{ "InsertText": "i", "at": 2 }   // 位置 2 插入 i      → 內容 "Hi"
-{ "DeleteText": "@2-2" }         // 刪掉位置 2 的字元   → 內容 "H"
-// 「當前內容」不是存下來的字串,而是把上面三筆從頭 replay 得到的結果 "H"
+// 一份 op log:三筆 append-only 操作(pos=游標位置, rev=伺服器序號)
+{ "op": "insert", "pos": 0, "char": "H", "rev": 1 }
+{ "op": "insert", "pos": 1, "char": "i", "rev": 2 }
+{ "op": "delete", "pos": 1, "len": 1,     "rev": 3 }   // 退格,刪掉 "i"
+// current content = 從 "" 依序重放 => "H"
 ```
-官方原文:文件「stored as a series of chronological changes」,而且「To display a document, we replay the revision log from the beginning」。`[A1][A2]` 所有編輯只歸為三種操作:InsertText、DeleteText、ApplyStyle。`[A2]`
 
-**(c) block 樹(block tree)** — 文件是一棵樹:每個「區塊(block,一段文字、一張圖、一列資料庫、甚至頁面本身)」是一筆有 ID 的記錄,記著自己的 `content`(子 block 的 ID 陣列)與 `parent`(父 block ID)。**Notion 屬此類**。最小實例:一個頁面含一段文字和一個項目符號清單:
+好處:每個 keystroke 是一筆小 op,不必每次重寫整份文件;而且「操作」正是 OT/CRDT 能互相變換的單位。Google Docs 屬此型(官方專利稱為 "changes log")。實務上會週期性存 snapshot,避免每次都從頭重放。〔GD-2〕
+
+**(c) block 樹(block tree)** — 文件不是一段文字,而是一堆**獨立的 block 記錄**,每筆 block 用指標(id 陣列)指向子 block,組成一棵樹。Notion 屬此型。一個「有一段文字 + 一個待辦」的頁面長這樣:
 
 ```jsonc
-// Notion block 樹(示意):每個 block 是一列記錄,靠 content 陣列串成樹
-{ "id": "pageA", "type": "page",     "content": ["b1", "b2"], "parent": "workspace" }
-{ "id": "b1",    "type": "text",     "properties": { "title": "Hello" }, "parent": "pageA" }
-{ "id": "b2",    "type": "bulleted_list_item", "properties": { "title": "item" }, "parent": "pageA" }
-// 「整頁內容」= 從 pageA 沿 content 指標往下遞迴收集子 block(官方 API:loadPageChunk)
+// 三筆 block 記錄,靠 content(向下指標)+ parent(向上指標)串成樹
+{ "id": "page-1", "type": "page",
+  "content": ["blk-A", "blk-B"], "parent": "workspace" }              // 頁面本身也是 block
+{ "id": "blk-A",  "type": "paragraph",
+  "properties": { "title": [["Hello"]] }, "content": [], "parent": "page-1" }
+{ "id": "blk-B",  "type": "to_do",
+  "properties": { "title": [["buy milk"]], "checked": [["No"]] },
+  "content": [], "parent": "page-1" }
+// 「渲染 page-1」= 解析 page-1.content -> 抓 blk-A、blk-B -> 各自再抓其 content...(樹走訪)
 ```
-官方原文:「Everything you see in Notion is a block」;每個 block 有 `Content`(「an array (or ordered set) of block IDs representing the content inside this block」)與 `Parent`;載頁面的 API `loadPageChunk`「descends… down the content tree」。`[A7]`
 
-**(d) 純字元序列(character sequence)** — 文件是一長串字元/位置索引。Google Docs 的 op log 內部即以字元位置索引運作(`InsertText 'T' @10` = 在第 10 位插入 T),可視為 (b)+(d) 的混合:op log 記錄的是對字元序列的操作。`[A1]`
+代價:渲染一頁要遞迴解析一堆 id(典型 N+1 讀取);好處:move/reparent/巢狀天然就是 block 級操作。〔NT-1〕〔NT-4〕
 
-> **一句話串起主線:** 文件模型直接決定了協作演算法能做多細——op log/字元序列讓 OT 能做**字元級**合併;block 樹讓協作退到 **block/record 級**整批交易;整份 blob 則天生難即時協作,要靠外掛服務(Synchrony)另闢即時層。這條「模型決定演算法」是全文論證主線。
+**(d) 字元序列(character sequence)** — 把文件看成一串有身分的字元,每個字元可被定位、變換。這是 OT/CRDT 在文字層真正操作的抽象;Google Docs 的「item」(每個字元、每個標籤都是一個 item)就是這層。〔GD-5〕
 
-### 2.2 協作演算法:OT vs CRDT vs 鎖 vs 存檔式
+### 2.2 兩種並發控制演算法:OT 與 CRDT
 
-- **OT(Operational Transformation,操作轉換):** 每個人的改動是「操作」;當你的操作和別人的並發操作撞在一起,系統把對方的操作「轉換(transform)」成相對於你當前文件仍正確的版本。通常需要**中央伺服器當仲裁者**排序。Google Docs 用它。官方:「The algorithm that we use to handle these shifts is called operational transformation (OT)」。`[A3]`
-  - 最小直覺:原文 `EASY`,你在最前面插了 `IT`(變 `ITEASY`),此時對方送來「刪除 @1」。若照字面刪你的第 1 位會刪錯字;OT 把對方的「刪除 @1」**平移 2 格**成「刪除 @3」,才正確。`[A3]`
-- **CRDT(Conflict-free Replicated Data Type,無衝突複製資料型別):** 資料結構本身數學上保證「不同順序套用同一組改動,最終收斂到同一結果」,理論上可去中心化、離線友善。Notion 只在**離線頁面**用到,且稱之為「new CRDT data model」(2025-12)。`[A11]`
-- **鎖(locking):** 同一段(如整段落)同時只准一人改。Google 明確**評估後否決**了段落鎖:「you could lock paragraphs… But locking paragraphs isn't a great solution」。`[A2]`
-- **存檔式 / last-write-wins(LWW,後寫覆蓋):** 沒有細粒度合併,誰最後存誰贏。Notion 線上模型的「operations 打包成 transaction、伺服器整批 commit/reject」在缺乏一手 OT/CRDT 說明的情況下,行為上偏向 record 級的伺服器仲裁(見 §6.3)。`[A10]`
+多人同時改同一份文件,核心難題是「兩個並發操作怎麼合併成大家一致的結果」。兩大流派:
 
-### 2.3 其他縮寫(第一次出現即解釋)
+**OT(Operational Transformation,操作變換)** — 有一個**中央伺服器**當唯一定序點。當你的操作跟別人並發時,伺服器/客戶端把操作**互相變換(transform)**位置後再套用,使大家收斂到同一狀態。範例:文件是 `"AC"`,User1 在位置 1 插 `"B"`(→`"ABC"`),User2 同時刪位置 1 的 `"C"`。若不變換,兩邊套用順序不同會得到不同結果;OT 把「後到的操作」相對「先到的操作」調整索引:
 
-- **FTS(Full-Text Search,全文檢索):** 讓使用者用關鍵字搜文件內文的索引系統(如 Apache Lucene、OpenSearch/Elasticsearch)。
-- **CDC(Change Data Capture,變更資料捕捉):** 把資料庫的每一筆變更即時「串流」出來給下游(Notion 用 Debezium 做 Postgres CDC)。`[A10]`
-- **VACUUM / TXID wraparound:** PostgreSQL 的維護機制。`VACUUM` 回收被刪列佔用的空間;`TXID`(transaction ID)是交易編號,若逼近上限會「wraparound(繞回)」而 Postgres 為安全會**停止所有寫入**——這正是 Notion 被迫分片的導火線。`[A8]`
-- **presence / telepointer:** 「presence」= 顯示誰在線上一起編輯;「telepointer」= 對方的游標/選取在你畫面上的即時彩色游標。
+```text
+初始 "AC"                    (索引: A=0, C=1)
+User1: insert(pos=1,"B")      User2: delete(pos=1,"C")   ← 兩者並發
+伺服器定序後 transform:
+  先 U1 -> "ABC";  再把 U2 的 delete(pos=1) 變換成 delete(pos=2)  ← 因為 U1 在前面插了一字
+結果兩邊都收斂到 "AB"
+```
 
----
+OT 需要一個中央權威決定順序;Google Docs、以及(OT 家族的)Confluence Synchrony 屬此路線。
 
-## 3. 量測準則(Measurement Criteria)—— 判斷答案的量尺
+**CRDT(Conflict-free Replicated Data Type,無衝突複製資料型別)** — 不需要中央定序。每個字元/元素帶一個**全域唯一、可排序的身分**(例如夾在兩個鄰居之間的分數位置 id),合併時取聯集、按 id 排序即得一致結果,順序無關。適合離線/去中心:兩份離線副本各改各的,重連後直接 merge 不需伺服器仲裁。Notion 的**離線**衝突解決明確採 CRDT。〔NT-8〕
 
-在看證據前,先定義「什麼叫把某一面向講清楚了」。本文對每個系統、每個面向,用以下三檔標示證據強度,並要求承重結論可被一手來源反查:
+> 一句話對比:**OT = 中央伺服器把並發操作互相變換;CRDT = 每個元素自帶身分,合併與順序無關、免中央仲裁。**
 
-| 標籤 | 定義 | 收錄要求 |
-|---|---|---|
-| **FACT** | 有一手來源(官方工程 blog / 官方文件 / 官方 API doc / 專利 / 官方影片)逐字佐證 | URL + 逐字引文 + 日期(見 Appendix) |
-| **INFERENCE** | 由一手事實合理推導,但官方未直接明說 | 標明由哪條 FACT 推得 |
-| **UNKNOWN** | 官方未公開,或只有二手來源 | 附 closure recipe(要用什麼查詢/在哪裡能關掉這個未知) |
+### 2.3 其他名詞(一行即懂,不需 code block)
 
-**「好答案」長什麼樣(pass 條件):**
-1. 每個面向都能落到 FACT / INFERENCE / UNKNOWN 其中一檔,不含糊。
-2. 每個承重結論至少跑過一次**反證搜尋**(例:三家「到底 OT 還是 CRDT 還是都不是」都要查),並回報反證結果或說明反證查空。
-3. 二手系統設計部落格**不得**冒充 FACT;snippet(搜尋結果摘要)不算證據,必須實際打開頁面讀過。
-4. 三系統協作能力差異若很大,照證據寫,不為對稱美化任何一方。
+- **XHTML 儲存格式(storage format)** — Confluence 把頁面正文存成一段類 XHTML 的 XML 字串,巨集(macro,可嵌入頁面的功能小程式)用自訂 `ac:` 標籤內嵌其中,例:`<ac:structured-macro ac:name="info">…</ac:structured-macro>`;整段字串放在資料庫一個文字欄位裡。〔CF-2〕〔CF-3〕
+- **telepointer(遠端游標/臨場感 presence)** — 在畫面上顯示「別人的游標/選取範圍」,讓你看到協作者此刻在哪、在改什麼。〔CF-9〕
+- **Lucene** — Apache 的全文檢索(full-text search)函式庫,把文件內容建成倒排索引(inverted index)存在磁碟上供關鍵字查詢;Confluence 內建用它。〔CF-6〕
+- **sharding(分片)** — 資料量大到單一資料庫撐不住時,把資料水平切成多份放到多台機器。Notion 依 workspace id 分片 Postgres。〔NT-6〕
+- **operation / transaction** — Notion 把 UI 動作表達成 operation(建立/更新單筆記錄),再把多個 operation 批次成一個 transaction 由伺服器整組 commit 或 reject。〔NT-5〕
+- **WebSocket** — 瀏覽器與伺服器間的全雙工長連線,適合把別人的即時變更「推」給你;Confluence Synchrony、Notion 即時通道都用推送式連線。〔CF-8〕
 
 ---
 
-## 4. 多來源舉證與三欄比較(核心產物)
+## 3. Methodology(方法論:比較的量尺)
 
-以下每格都標了證據檔位並回指 Appendix 錨點。**這張三欄表是本 spike 的核心交付物。**
+「這類編輯系統該怎麼比」的 rubric。以下每個面向都給出**判準**(要看什麼、什麼算好),先立在證據之前;§5 會在看過真實證據後重新檢視這把尺。
 
-### 4.1 三欄比較表(Storage + Collaboration)
+**A. 儲存與文件模型**
+1. **文件模型** — blob / op log / block 樹 / XHTML 字串;判準:是否天生支援細粒度並發(op log/block 佳,整段 blob 差)。
+2. **底層資料庫** — RDBMS / 分片 Postgres / 專有;判準:能否隨資料量水平擴展。
+3. **二進位分離** — 文字與圖片/附件是否分離到物件儲存(S3 等);判準:大二進位不塞進主資料庫。
+4. **快取** — 有哪些快取層。
+5. **全文檢索** — 引擎、索引如何建/更新。
 
-| 面向 | **Google Docs** | **Confluence**(Server/DC 為主) | **Notion** |
+**B. 協作**
+6. **並發演算法** — OT / CRDT / 鎖 / save-based-LWW(last-write-wins,後寫入者直接覆蓋前者)/ 中央 rebase;判準:能否無鎖即時多人同編。
+7. **協作粒度** — 字元 / block / 整頁;判準:越細,並發衝突越少、體驗越即時。
+8. **即時傳輸層** — WebSocket / long-poll / SSE(Server-Sent Events,伺服器單向推播的長連線)/ 純 REST。
+9. **臨場感呈現** — 是否有 presence/游標、是否逐字即時、還是存檔後才見。
+10. **衝突解決** — transform / merge / 覆寫(overwrite)/ abort。
+
+**C. 其他**
+11. **版本歷史** — 粒度與儲存方式(整份快照 vs diff)。
+12. **離線編輯** — 是否支援、如何同步。
+13. **權限模型** — 全域/空間/頁面、繼承規則。
+14. **擴展性/分片** — 如何水平擴展。
+15. **貫穿主題** — 文件模型如何決定了協作演算法與擴展路線(這是最終要回答的因果)。
+
+**評分表達:** 每格標 FACT / INFERENCE / UNKNOWN。若官方未揭露,寧可寫 UNKNOWN + closure recipe,不臆測、不為對稱補齊。
+
+---
+
+## 4. Findings(發現:逐系統取證 + 三欄比較表)
+
+本節於 finding 高度陳述;逐字引文與來源清單見 Appendix A,反證日誌見 Appendix B。
+
+### 4.1 Google Docs — 字元級 op log × OT/Jupiter
+
+**文件模型是 op log(FACT)。** Google 專利明述文件同步/儲存單位是 append-only 的 "changes log",且「文件資料的真實來源是伺服器」;維基百科(引一手鏈)也稱「the document is stored as a list of changes」。這正是 §2.1(b) 的形狀。〔GD-1〕〔GD-2〕
+
+**協作演算法是 OT,源自 Jupiter client-server 模型(FACT)。** Google 自 published 的 Wave OT 白皮書逐字寫明「Google Wave uses the Operational Transformation (OT) framework」、且「the starting point for Wave OT was … the Jupiter collaboration system」、並「requires the client to wait for acknowledgement from the server before sending more operations」——即**中央伺服器定序、一次一個在途操作**。Wave 是 Docs 現代即時引擎的直系理論來源。粒度是**字元/item 級**(「every character, start tag or end tag … is called an item」),前端因此能「逐字」看到他人編輯,並以每人專屬顏色的游標呈現臨場感。〔GD-4〕〔GD-5〕〔GD-6〕〔GD-7〕
+
+**離線支援(FACT)。** 官方 Help 說明離線可建立/檢視/編輯,行動 App 原生支援;專利描述離線可持續編輯、重連後以同一套 change-log/OT 對帳。版本歷史自動保存、可檢視可回復、每位作者以顏色區分;但 Drive API 明言「頻繁編輯的 Google Docs 版本清單可能不完整」——暗示底層細粒度 op log 會被壓縮/合併成較粗的具名版本。〔GD-8〕〔GD-9〕
+
+**儲存後端幾乎全 UNKNOWN。** 「Docs 用 Bigtable/Spanner/Colossus」這類敘述**只**出現在會自我 hedge(「likely」)的二手系統設計部落格,無任何 Google 一手佐證;快取層、二進位/圖片分離、全文檢索引擎與索引管線同樣未公開。吞吐/延遲數字(如「200k ops/sec」「<200ms」)亦僅見二手,**不得當作 Google 官方數據**。closure recipe 見 Appendix C。〔GD-3〕
+
+### 4.2 Confluence — RDBMS 存 XHTML 字串 × Synchrony 中央 rebase
+
+**文件模型是「一段 XHTML 字串存在 RDBMS 文字欄位」(FACT)。** 官方說明頁面正文用 XHTML-based 儲存格式(「Technically, it's XML」),巨集以 `ac:` 標籤內嵌;此正文字串存在 `BODYCONTENT` 表(內容 metadata 在 `CONTENT` 表)。支援的資料庫是 PostgreSQL / MySQL / Oracle / SQL Server(H2 僅測試用)。這是 §2.1(a) 近似「整段 blob」的路線——渲染時還要處理內嵌巨集。〔CF-1〕〔CF-2〕〔CF-3〕
+
+**二進位分離(FACT)。** 附件預設存本機檔案系統的 `attachments/` 目錄;Confluence 8.1 起(Data Center)支援 S3 物件儲存(prefix `/confluence/attachments/v4`,且 S3「僅供附件資料」);舊版曾存資料庫/WebDAV 但已不支援。**文字進 RDBMS、二進位進檔案系統/S3**,分離明確。〔CF-4〕〔CF-5〕
+
+**全文檢索用 Lucene(FACT)。** 官方:「By default, Confluence uses Lucene for indexing」;索引檔在 `<home>/index`;變更進佇列、背景每約 5 秒批次處理;叢集中每節點各存一份完整索引,靠 journal service 同步。快取在叢集用 Hazelcast(EhCache 為歷史單機層,列 INFERENCE)。〔CF-6〕〔CF-7〕
+
+**協作:Synchrony 微服務,WebSocket + telepointer(FACT);演算法為 OT 家族的伺服器仲裁 edit-script/rebase,但官方從不指名(見反證)。** 官方:「Synchrony is a micro service that allows the synchronization of arbitrary data models in real time」、「will act as the source of truth for page content」、定期存 snapshot;傳輸用 WebSocket(JWT + contentId,叢集需 session affinity + WebSocket 的負載平衡);支援 telepointer 遠端選取;斷線變更緩衝、重連合併。單一 shared draft、持續存檔,但**未發佈的變更不另存版本**。發佈時 `conflictPolicy` 目前僅支援 `abort`——中央權威直接拒衝突,而非 CRDT 自動合併。〔CF-8〕〔CF-9〕〔CF-10〕〔CF-11〕
+
+> **關於演算法的精確定性(這是 Confluence 最需要誠實的一格):** Atlassian 的**文件/部落格從未使用「operational transformation / OT / CRDT」任何一詞**自稱。唯一描述機制的一手 Atlassian 產物是**專利 US9355083B1**(發明人 Haymo Meran、Tobias Steiner,即 Synchrony 團隊,來自 Atlassian 收購的 Wikidocs),描述的是**伺服器產生並轉發 "edit script"** 的**中央仲裁模型**——屬 OT 家族、**明確不是 CRDT**,但專利本身也不自稱「OT」。故「Confluence 用 OT」是**二手詮釋**,本文定性為「**伺服器仲裁的 edit-script/rebase(OT 家族),非 CRDT,官方未指名**」。〔CF-12〕〔CF-13〕
+
+**版本歷史為整份快照(FACT/INFERENCE)。** 官方:每次修改建一個新版本,還原=複製該舊版本向前,刪版本不重新編號——用字是「creates a copy」,指向**整份快照**而非 diff 儲存(二手宣稱 diff 儲存與此一手用語矛盾,列 UNKNOWN)。權限三層(全域→空間→頁面限制),view 限制向下繼承、edit 限制不繼承,限制只能收窄不能放寬。**不支援離線編輯**(Synchrony 為 source of truth 且需 live WebSocket;無任何官方離線頁面)——列 INFERENCE。擴展性:Data Center 為 active-active 叢集,共享 DB、共享 home 放附件、local home 放索引/快取。〔CF-14〕〔CF-15〕〔CF-16〕
+
+### 4.3 Notion — 一切皆 block × 分片 Postgres × 線上 operation/離線 CRDT
+
+**文件模型是 block 樹,一切皆 block(FACT)。** 官方 engineering blog:「Everything you see in Notion is a block … even pages themselves」;每個 block 有 ID / Properties / Type / **Content(子 block id 的有序陣列,即向下指標)** / **Parent(向上指標,僅供權限用)**;block 可無限巢狀,頁面就是靠這些指標組出的樹(§2.1(c))。〔NT-1〕〔NT-4〕
+
+**線上編輯是 operation→transaction(FACT);離線才明確用 CRDT(FACT)。** 官方:UI 動作「are expressed as operations that create or update a single record」、「operations are batched into transactions that are committed (or rejected) by the server as a group」——**伺服器整組 commit/reject**,是中央定序的 block/record 級模型,**非字元級 OT**。另一篇官方離線文明述:「pages that are marked as available offline are dynamically migrated to our new **CRDT** data model for conflict-resolution」,並點名要解決「reference tracking、background syncing、rich-text conflict resolution」。本機快取/離線儲存用 **SQLite**;重連以 `lastDownloadedTimestamp` 對比伺服器 `lastUpdatedTime` 只抓較新頁面;即時更新走「訂閱 channel、收到訊息就抓最新變更」的推送模型。〔NT-5〕〔NT-8〕〔NT-9〕〔NT-10〕
+
+> **Notion 協作最需誠實的一格:** 官方**只**明確了兩件事——線上是 operation/transaction、離線是 CRDT。**線上並發的精確合併語意(是否 block 級 LWW?字元級?)官方未揭露**,二手流傳的「OT+CRDT hybrid / 純 CRDT / LWW」互相矛盾且無一手佐證,一律**不採信、列 UNKNOWN**。
+
+**資料庫是 workspace 分片的 Postgres(FACT,罕見的一手好料)。** 2020 從單體 Postgres 轉分片:**480 個邏輯分片(每個是一個 Postgres schema)平均分布於 32 台實體機**,依 **workspace id** 分片(「each block belongs to exactly one workspace」)。2023「The Great Re-shard」把 32→96 台、零停機(用 Postgres logical replication,同步時間從 3 天降到 12 小時,PgBouncer 在棧內)。分析用資料湖:Postgres→(Debezium CDC(Change Data Capture,變更資料擷取 —— 把資料庫的每筆變更即時串流出去))→Kafka→(Apache Hudi/Spark)→**S3**,下游含 **Elasticsearch**、向量庫、KV;規模「兩千億以上 blocks、數百 TB,每 6–12 個月翻倍」。〔NT-6〕〔NT-7〕〔NT-11〕
+
+**全文檢索用 Elasticsearch(FACT 為下游存在;live search 細節 INFERENCE)。** 資料湖官方文把 Elasticsearch 列為 product-facing 下游存在(一手);「跑在 EC2、從 managed 遷移」等細節僅第三方 vendor case study(二手,附 caveat)。物件儲存(圖片/檔案)= S3 屬 INFERENCE(資料湖用 S3 為一手,但無「圖片存 S3」的逐字一手)。權限沿 parent 指標鏈評估,分析時「has to be constructed on the fly via expensive tree traversal computation」——block 樹導致 N+1 讀取與權限樹走訪成本(FACT)。頁面歷史的儲存格式屬 UNKNOWN。〔NT-11〕〔NT-12〕〔NT-13〕
+
+### 4.4 三欄比較表(核心產物)
+
+> 每格標 FACT / INF(inference)/ UNK(unknown)(末列「揭露程度(meta)」為對三家揭露不對稱的整體評註,不逐格標記)。錨點回指 Appendix A。
+
+| 面向 | **Google Docs** | **Confluence** | **Notion** |
 |---|---|---|---|
-| **D1 文件模型** | **op log(revision log)**:文件=一串按時間排序的改動;三種操作 Insert/Delete/ApplyStyle;current content 靠**從頭 replay** 算出 — **FACT** `[A1][A2]` | **整份 XHTML blob(storage format,技術上是 XML)**,存於 `BODYCONTENT` 表一列 — **FACT** `[A12][A13]`。Cloud 改用 ADF(Atlassian Document Format,JSON) — **FACT(有即時同編);內部細節 INFERENCE** `[A18]` | **block 樹**:每 block 一筆記錄,含 ID/Type/Properties/`content`(子 block ID 陣列)/`parent`;整頁靠 `loadPageChunk` 遞迴 content 樹重建 — **FACT** `[A7]` |
-| **D2 資料庫 / 一列存什麼** | **UNKNOWN**:官方從未公開 Docs 用哪種 DB(Bigtable/Spanner 皆為二手臆測);Colossus 為 Drive 級依賴的 **INFERENCE**。伺服器持有「完整 revision log + 最新一次處理後的文件狀態」 — 後者為 **FACT** `[A1]` | **PostgreSQL / MySQL / Oracle / SQL Server**(Server/DC 支援矩陣;不支援 MariaDB/Percona) — **FACT** `[A16]`。一列 = 一個 `ContentEntityObject`(CONTENT 表存版本/中繼,BODYCONTENT 表存 body) — **FACT** `[A13]` | **PostgreSQL**,source-of-truth;**每個 block = 一列(row)** — **FACT** `[A7][A9][A10]`。`properties`/`content` 是否以 JSON 欄位存 = **UNKNOWN** |
-| **D3 二進位 / 物件儲存** | **INFERENCE/UNKNOWN**:2010 模型只涵蓋文字/樣式三操作,未提圖片;圖片是否分離存 blob store 無一手佐證 | **檔案系統為預設;Confluence 8.1 起支援 Amazon S3;DB/WebDAV 儲存已不再支援** — **FACT** `[A15]`(文字與二進位**分離**) | **S3 用於 data lake** — **FACT** `[A10]`;使用者上傳檔案/圖片是否也走 S3 = **INFERENCE** |
-| **D4 全文檢索 FTS** | **UNKNOWN**:Drive/Docs 內部搜尋引擎未公開;「首 100 頁/OCR」等數字僅見二手 | **Apache Lucene 為預設**(索引落在 `<home>/index`);**Data Center 8.9+ 可選 OpenSearch** — **FACT** `[A17]` | **UNKNOWN**:官方只預告「Search and AI Embedding RAG Infra」文章;Elasticsearch 為**二手臆測**,非一手 — **UNKNOWN** `[A10]` |
-| **D5 版本 / 歷史** | op log 天然即完整歷史;可回放任一 revision — **FACT** `[A1][A2]` | **每次編輯建一份完整新版本、全部保留;還原舊版=複製該版成新的當前版** → 全版本快照(diff 只是顯示層) — **FACT(全版本);「非 diff 儲存」為 INFERENCE** `[A14]` | 200B+ blocks 規模下的頁面歷史機制官方未細述 — **UNKNOWN**;離線衝突解由 CRDT 處理 — **FACT** `[A11]` |
-| **D6 協作演算法** | **OT(Operational Transformation)**,中央伺服器仲裁;明確否決「版本比對」與「段落鎖」 — **FACT** `[A2][A3]` | **Synchrony 服務即時同步**;每頁一份 Synchrony change log(「a graph of all edits」) — **FACT** `[A16]`。**演算法是否為 OT:Atlassian 一手文件未寫明 → UNKNOWN(僅二手稱 OT)** `[A16]` | 線上:**operations 打包成 transaction,伺服器整批 commit/reject** — **FACT** `[A10]`;**官方未宣稱線上用 OT 或 CRDT** → 演算法 **UNKNOWN**;**CRDT 僅用於離線頁面(2025-12 上線的「new CRDT data model」)** — **FACT** `[A11]` |
-| **D7 協作粒度** | **字元級(character-by-character)** — **FACT** `[A4]` | 富文字即時同編(telepointers/遠端選取) — **FACT**;精確粒度演算法層未公開 — 連動 D6 UNKNOWN `[A16]` | **record/block 級**(操作以「create or update a single record」為單位)— **INFERENCE**(由 D6 FACT 推);離線「rich-text conflict resolution」暗示 CRDT 下有子 block 級合併 — **FACT(有此問題);粒度 INFERENCE** `[A10][A11]` |
-| **D8 即時傳輸** | **UNKNOWN**:2010 文只描述邏輯協定(client 送一筆改動、server ack/broadcast),未點名 WebSocket/long-poll/SSE — **UNKNOWN** `[A5]` | **WebSocket,取不到時退回 XHR(XML HTTP Request)** — **FACT** `[A16]`;Cloud 亦以 WebSocket 對 Synchrony 開 session — **FACT** `[A18]` | 離線頁面走「channels」訂閱+收訊後 fetch — **FACT**;是否 WebSocket = **INFERENCE** `[A11]` |
-| **D9 呈現 / 衝突解** | 即時、每個 editor 把收到的改動 transform 成相對本地版本正確;樂觀本地先套用、一次只送一筆 pending change — **FACT** `[A5]`;彩色游標 UI 機制 — **UNKNOWN** | 即時同編、顯示協作者 avatar 與遠端游標(telepointer);Synchrony 為 source of truth,離線緩衝、回線合併 — **FACT** `[A16]` | 離線:先本地改、回線再同步;衝突由 CRDT(離線)處理 — **FACT** `[A11]`;線上 presence/游標機制 — **UNKNOWN** |
-| **D10 擴展性** | 未公開 — **UNKNOWN** | 自管;水平擴展靠 Data Center 叢集(細節本文未取一手) — **UNKNOWN** | **公開的一手素材**:**480 邏輯分片(Postgres schema)**,原 **32 台實例(每台 15 schema)**,2023 **re-shard 到 96 台(每台 5 schema)**,480 恆定;分片鍵=**workspace ID**;動機=VACUUM 停滯 / TXID wraparound;PgBouncer 零停機切換 — **FACT** `[A8][A9][A10]` |
+| **文件模型** | 操作日誌 op log(專利稱 "changes log");current=重放操作 · **FACT**〔GD-2〕 | 一段 XHTML/XML 字串(近整段 blob),巨集內嵌 · **FACT**〔CF-2〕〔CF-3〕 | block 樹:一切皆 block,`content`/`parent` 指標串成樹 · **FACT**〔NT-1〕 |
+| **底層資料庫** | 未公開(二手猜 Bigtable/Spanner)· **UNK**〔GD-3〕 | RDBMS:PostgreSQL/MySQL/Oracle/SQL Server · **FACT**〔CF-1〕 | 分片 Postgres:480 邏輯分片 / 32→96 實體機,依 workspace 分片 · **FACT**〔NT-6〕〔NT-7〕 |
+| **二進位分離 / 物件儲存** | 未公開(推測 Colossus/Drive)· **UNK/INF**〔GD-3〕 | 附件→本機檔案系統,或 S3(8.1+,DC);S3 僅附件 · **FACT**〔CF-4〕〔CF-5〕 | 資料湖用 S3(一手);圖片/檔案存 S3 · **INF**〔NT-11〕 |
+| **快取** | 未公開 · **UNK** | Hazelcast(叢集);EhCache(歷史單機)· **FACT/INF**〔CF-7〕 | 用戶端 SQLite 本機快取;伺服器端快取層未公開 · **FACT/UNK**〔NT-9〕 |
+| **全文檢索** | 未公開 · **UNK**〔GD-3〕 | Lucene,索引在磁碟,背景每 ~5s 批次;每節點各一份 · **FACT**〔CF-6〕 | Elasticsearch(下游 product-facing)· **FACT**;live 細節 **INF**〔NT-11〕〔NT-12〕 |
+| **並發演算法** | **OT**(Jupiter client-server),中央定序 · **FACT**〔GD-4〕〔GD-6〕 | 伺服器仲裁 edit-script / rebase(**OT 家族,非 CRDT**);官方未指名 · **FACT(機制)/官方未指名**〔CF-11〕〔CF-12〕 | 線上:operation→transaction 伺服器整組 commit;**離線:CRDT** · **FACT**〔NT-5〕〔NT-8〕 |
+| **協作粒度** | 字元 / item 級 · **FACT**〔GD-5〕 | 文件變更 / step 級(細節 INF)· **INF**〔CF-11〕 | block / record 級(字元級語意未揭露)· **FACT/UNK**〔NT-5〕 |
+| **即時傳輸層** | 現行未公開(史上 BrowserChannel/long-poll)· **INF/UNK**〔GD-附〕 | **WebSocket**(JWT+contentId;叢集需 session affinity)· **FACT**〔CF-8〕 | 訂閱 channel 的推送模型;傳輸技術未指名 · **FACT/UNK**〔NT-10〕 |
+| **臨場感 / 游標** | 每人專屬顏色游標,**逐字**即時 · **FACT**〔GD-7〕 | telepointer 遠端選取 · **FACT**〔CF-9〕 | 產品有 presence/游標;機制未公開 · **FACT(功能)/UNK**〔NT-附〕 |
+| **衝突解決** | OT transform 到收斂,無鎖 · **FACT**〔GD-6〕 | 中央 source of truth;發佈 `conflictPolicy=abort`(拒衝突);舊模型曾提示/合併/覆寫 · **FACT**〔CF-10〕〔CF-16〕 | 伺服器 commit/reject transaction;離線 CRDT merge · **FACT**〔NT-5〕〔NT-8〕 |
+| **版本歷史** | 自動保存、可回復、作者顏色區分;細粒度 op 壓縮成具名版本 · **FACT**〔GD-8〕〔GD-9〕 | 每次修改建整份快照版本;還原=複製舊版前移 · **FACT**〔CF-14〕 | 由 operation/transaction 導出(儲存格式未公開)· **INF/UNK**〔NT-5〕 |
+| **離線編輯** | **支援**(桌面快取 + 行動原生),OT 對帳 · **FACT**〔GD-8〕 | **不支援**(Synchrony 需 live WebSocket)· **INF**〔CF-16〕 | **支援**(標記離線頁 → SQLite + CRDT + 時戳對帳)· **FACT**〔NT-8〕〔NT-9〕 |
+| **權限模型** | Drive 分享角色(owner/writer/…)· **FACT**〔GD-9〕 | 三層:全域→空間→頁面限制;view 繼承、edit 不繼承;只能收窄 · **FACT**〔CF-15〕 | 沿 parent 指標鏈,樹走訪評估 · **FACT**〔NT-13〕 |
+| **擴展性 / 分片** | 未公開(per-doc 定序推測)· **UNK**〔GD-附〕 | Data Center active-active 叢集,共享 DB/home · **FACT**〔CF-16〕 | workspace 分片 Postgres(32→96 零停機)+ S3 資料湖 · **FACT**〔NT-6〕〔NT-7〕 |
+| **揭露程度(meta)** | 協作理論全公開、儲存幾乎不談 | 協作演算法從不指名、儲存/schema 文件齊全 | 儲存/分片一手詳盡、線上協作演算法極少談 |
 
-### 4.2 D1「文件模型」並排(結構最能一眼看出取捨)
+---
 
-| | 一份文件在儲存層長什麼樣 | 「當前內容」怎麼得出 | 決定了什麼協作能力 |
+## 5. Discussion(討論:重審量尺 + 依尺評估)
+
+### 5.1 重審 rubric(看過證據後,這把尺還量對東西嗎?)
+
+三處需要修正/強化:
+
+1. **「並發演算法」不能只填 OT/CRDT 二選一。** 證據顯示真實世界是**光譜**:Google Docs 是教科書 OT;Confluence 是「OT 家族的中央仲裁 edit-script/rebase」(專利佐證,但官方不指名,且**非**去中心 CRDT);Notion 是「線上 operation/transaction 中央 commit + **離線** CRDT」的**混合**。硬塞成 OT vs CRDT 會失真——修正為記錄「中央 vs 去中心」「線上 vs 離線各用什麼」。這正是反證搜尋救回的精確度(Appendix B)。
+
+2. **新增「揭露程度(meta)」這一列是必要的。** 三家公開的部位極不對稱(見表末列),不記錄的話讀者會誤把「Google 儲存欄=UNKNOWN」當成 Google 比較差,其實只是不公開。量尺必須把「這格是真差,還是只是沒揭露」分開——本文以 FACT/INF/UNK 標記達成。
+
+3. **「文件模型」應升格為貫穿主軸而非並列面向之一。** 證據顯示它是因,其餘多是果(見 §5.2)。原 rubric 把它與其他 15 項並列,低估了它。
+
+其餘判準(儲存、傳輸、離線、擴展)經證據檢驗仍成立,不變。
+
+### 5.2 依(修正後)量尺評估:文件模型如何決定下游
+
+把三欄表縱讀,一條因果鏈浮現——**文件模型決定了協作演算法能有多細、以及擴展怎麼走**:
+
+- **op log(Google Docs)→ 天生適合字元級 OT。** 因為文件本來就是「一串操作」,操作正是 OT 能互相 transform 的單位,於是能做到**無鎖、逐字、即時**、還能離線後用同一套 change-log 對帳。代價:這套即時引擎複雜且高度專有,Google 選擇不公開儲存細節。
+
+- **整段 XHTML 字串 in RDBMS(Confluence)→ 即時協作是「後加的」且需中央仲裁。** 正文是一大段字串,本質不利細粒度並發(§2.1(a));Confluence 早年只能用「提示他人正在編輯 + 合併/覆寫」的 save-based 模型,直到 6.0 才用 Synchrony 這個**外掛的中央權威服務**把「任意資料模型」即時同步上去。RDBMS 也決定了擴展走「Data Center 叢集」而非水平分片。全文檢索用 Lucene(貼著檔案系統索引)也是這個 on-prem/DC 世界觀的自然結果。
+
+- **block 樹(Notion)→ 協作與擴展都以 block 為單位。** 因為一切皆 block、且每 block 屬於恰好一個 workspace,**分片鍵天然就是 workspace id**(整個 workspace 的 block 落在同一分片,避免跨分片 join);協作也落在 block/record 級的 operation/transaction;離線能用 CRDT 是因為 block 的 move/reparent/巢狀天然是可合併的結構操作。代價:渲染一頁要走訪一棵指標樹(N+1),權限要沿 parent 鏈算,分析要「tree traversal + 去正規化」——這些成本 Notion 的一手文章都直說了。
+
+- **一句話貫穿:** **文件被「存成什麼」,就決定了它能被「一起改成什麼樣」。** op log→字元級 OT;字串 blob→後加中央仲裁;block 樹→block 級 operation + 離線 CRDT + workspace 分片。
+
+### 5.3 誠實的不確定性
+
+三個載重結論的證據強度不同:Google=OT、Notion=block 樹/分片/離線 CRDT 皆**一手強證**;Confluence 的協作**機制**有專利佐證但官方**不指名**(定性為推得的家族歸屬);三家的「線上並發精確語意」「儲存後端」多處 UNKNOWN(見 Appendix C)。凡表中 UNK/INF 者,不應被讀成能力差,而是**未公開或需進一步取證**。
+
+---
+
+## 6. Conclusion(結論:直接回答原問題)
+
+**原問題:三者在架構取捨上各站在什麼位置、為什麼?** 依 §4.4 三欄表與 §5 的評估,直接回答:
+
+- **Google Docs 站在「即時協作深度」的極端。** 因為文件模型是**字元級 op log**,它是唯一能**無鎖、逐字、即時**多人同編又支援離線的系統,協作演算法是教科書 **OT(Jupiter)**。取捨:把工程重心壓在即時引擎與 OT,**犧牲了儲存架構的公開性**(後端幾乎全 UNKNOWN)。適合「一份文件、多人此刻一起打字」。
+
+- **Confluence 站在「企業 wiki 的結構化與可維運」一端。** 文件模型是**存進關聯式資料庫的 XHTML 字串**,即時協作(Synchrony)是**後加的中央仲裁 rebase**(OT 家族、非 CRDT、官方不指名),傳輸用 WebSocket、有 telepointer,但**不支援離線**,擴展靠 Data Center 叢集而非分片,全文檢索用 Lucene。取捨:換來 macro 生態、細緻的空間/頁面權限、企業可自管的 schema 與索引,協作即時性與離線能力則不是它的強項。適合「受治理的企業知識庫」。
+
+- **Notion 站在「文件即資料、萬物皆 block」一端。** 文件模型是**指標串成的 block 樹**,線上協作是 **block 級 operation→transaction 中央 commit**、**離線**才明確用 **CRDT**;儲存是**依 workspace 分片的 Postgres** + S3 資料湖 + Elasticsearch。取捨:block 樹換來極高的內容彈性與乾淨的 workspace 分片鍵,但付出**渲染 N+1、權限樹走訪**的讀取成本,且**線上並發的精確語意官方未揭露**。適合「結構化工作區/知識庫,兼顧離線」。
+
+**wrap-up(可帶走的一句):** 這三者不是「同一題的三個好壞答案」,而是**三種文件模型各自的邏輯終點**。要選型時,先問「我的內容天生是一串操作、一段文件、還是一棵 block 樹?」——答案基本上就決定了你能做字元級 OT、只能後加中央 rebase、還是走 block 級 operation+CRDT+分片這三條路的哪一條。表中所有 UNK/INF 格請讀成「官方未公開或需再取證」,而非能力落差;要把某格從 UNK 升為 FACT,依 Appendix C 的 closure recipe 執行。
+
+---
+
+## Appendix A — 證據清單(逐字引文,provenance-only 錨點)
+
+> 全部擷取於 2026-07-19,https-only。〔GD〕=Google Docs,〔CF〕=Confluence,〔NT〕=Notion。
+
+### A.1 Google Docs
+
+- 〔GD-1〕 https://en.wikipedia.org/wiki/Google_Docs — 「the document is stored as a list of changes」(維基,引一手鏈;僅用於已被一手佐證處)。
+- 〔GD-2〕 https://patents.google.com/patent/US10382547B2/en (assignee Google)—「Each OT pair keeps track of only one change at a time, and these changes are recorded in a changes log.」/「the source of truth for the document data is the server.」
+- 〔GD-3〕 https://www.systemdesignhandbook.com/guides/google-docs-system-design/ —(二手,自我 hedge)「In Google's infrastructure, this **likely** involves Bigtable for storing document content and operation logs … Spanner … Colossus …」→ 本文列 UNKNOWN/INFERENCE,非 FACT。
+- 〔GD-4〕 https://svn.apache.org/repos/asf/incubator/wave/whitepapers/operational-transform/operational-transform.html (Google Wave OT 白皮書)—「Google Wave uses the Operational Transformation (OT) framework of concurrency control.」
+- 〔GD-5〕 同上 —「In Google Wave, every character, start tag or end tag in a document is called an item.」
+- 〔GD-6〕 同上 —「The starting point for Wave OT was the paper 'High-latency, low-bandwidth windowing in the Jupiter collaboration system'.」/「Wave OT modifies the basic theory of OT by requiring the client to wait for acknowledgement from the server before sending more operations.」
+- 〔GD-7〕 https://en.wikipedia.org/wiki/Google_Docs —「An editor's current position is represented with an editor-specific color/cursor …」/「users can see character-by-character changes as other collaborators make edits」。
+- 〔GD-8〕 https://support.google.com/docs/answer/6388102 —「If you aren't connected to the internet, you can still create, view, and edit files on Google Docs, Sheets, Google Slides」;維基:「The Android and iOS apps natively support offline editing.」;〔GD-2〕專利:「Offline editing can continue so long as the user deems.」
+- 〔GD-9〕 https://developers.google.com/workspace/drive/api/guides/manage-revisions —「The list of revisions returned … might be incomplete for files with a large revision history, including frequently edited Google Docs …」;維基:「a revision history is automatically kept so past edits may be viewed and reverted.」
+- 〔GD-附〕 傳輸/擴展:現行 wire protocol、per-doc 定序、op-log 壓縮頻率官方未公開(史上為 BrowserChannel/long-poll,屬 INFERENCE)。Jupiter 一手理論:Nichols/Curtis/Dixon/Lamping, UIST 1995, DOI 10.1145/215585.215706(摘要付費牆,metadata 經 researchr.org 確認)。
+
+### A.2 Confluence
+
+- 〔CF-1〕 https://confluence.atlassian.com/doc/database-configuration-159764.html —「The embedded H2 database is only supported for testing …」;支援 Oracle/MySQL/PostgreSQL/SQL Server,經 JDBC 連線。
+- 〔CF-2〕 https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html —「This page describes the XHTML-based format that Confluence uses to store the content of pages …」/「Technically, it's XML …」/巨集例 `<ac:emoticon ac:name="smile" />`。
+- 〔CF-3〕 https://confluence.atlassian.com/doc/confluence-data-model-127369837.html — BODYCONTENT=「The content of Confluence pages. No version information or other metadata is stored here.」;CONTENT=「A persistence table for the ContentEntityObject …」。
+- 〔CF-4〕 https://confluence.atlassian.com/doc/attachment-storage-configuration-166876.html —「By default, Confluence stores attachments in the attachments directory within the configured Confluence home folder.」/「These storage methods [database/WebDAV] are no longer supported.」
+- 〔CF-5〕 https://confluence.atlassian.com/spaces/DOC/pages/1206794554/Configuring+S3+object+storage —「attachment data is stored in S3 using the root prefix /confluence/attachments/v4」/「S3 object storage is for attachment data only.」
+- 〔CF-6〕 https://confluence.atlassian.com/doc/content-index-administration-148844.html —「By default, Confluence uses Lucene for indexing.」/「You can find the index in the <home-directory>/index directory.」/批次「as often as every 5 seconds」;叢集每節點各存完整索引 + journal service 同步。
+- 〔CF-7〕 https://confluence.atlassian.com/doc/clustering-with-confluence-data-center-790795847.html —「Confluence uses a combination of local caches, distributed caches, and hybrid caches that are managed using Hazelcast.」
+- 〔CF-8〕 https://developer.atlassian.com/server/confluence/collaborative-editing-for-confluence-server/ —「A WebSocket session is opened to Synchrony using the provided JWT and the contentId of the page being edited」;叢集 LB「needs to support 'session affinity' and WebSockets」(〔CF-7〕)。
+- 〔CF-9〕 同上 —「It supports special synchronisation for HTML WYSIWYG editors, including telepointers (remote selections).」
+- 〔CF-10〕 https://developer.atlassian.com/cloud/confluence/collaborative-editing/ —「Synchrony is a micro service that allows the synchronization of arbitrary data models in real time.」/「will act as the source of truth for page content.」/「snapshot … at regular intervals.」/「Currently only the abort policy is supported.」
+- 〔CF-11〕 https://developer.atlassian.com/server/confluence/collaborative-editing-for-confluence-server/ —「All changes are buffered; once Synchrony comes back online, buffered changes will be merged and synchronised between clients.」(機制描述;演算法名未見於任何 Atlassian 頁)。
+- 〔CF-12〕 https://patents.google.com/patent/US9355083B1/en (assignee **Atlassian Pty Ltd**;inventors Haymo Meran, Tobias Steiner)—「generating an edit script defining operations that may be performed on dataset A to generate dataset B」/「Server 104 processes edit script 1 … Server 104 then transmits the edit script to clients.」→ 伺服器仲裁 edit-script(OT 家族),不自稱 OT,明確非 CRDT。
+- 〔CF-13〕 https://marijnhaverbeke.nl/blog/collaborative-editing.html (ProseMirror 作者;Atlaskit 編輯器底層)—「ProseMirror's algorithm is centralized …」/「Unlike OT, it does not try to guarantee that applying changes in a different order will produce the same document.」→ 佐證「中央權威 rebase、非去中心 CRDT」的家族歸屬(旁證,非 Atlassian 一手)。
+- 〔CF-14〕 https://confluence.atlassian.com/doc/page-history-and-page-comparison-views-139379.html —「Confluence tracks the history … by creating a new version of the page each time it's modified.」/「restoring an older version creates a copy of that version」。
+- 〔CF-15〕 https://confluence.atlassian.com/doc/page-restrictions-139414.html —「View restrictions are inherited … edit restrictions are not inherited.」/「Restrictions don't override a person's space permission.」
+- 〔CF-16〕 https://confluence.atlassian.com/doc/clustering-with-confluence-data-center-790795847.html —「All application nodes are active and process requests.」/ shared home=「attachments …」、local home=「Lucene indexes, configuration files …」;離線:無任何官方離線編輯頁(→ INFERENCE 不支援)。舊並發模型:https://confluence.atlassian.com/doc/concurrent-editing-and-merging-changes-144719.html —「If another user is editing the same page … Confluence will display a message …」/「If there are no conflicting changes, Confluence will merge the changes.」
+- 〔CF-附〕 Synchrony 血緣:Haymo Meran 為被收購公司 Wikidocs 創辦人(二手 biographical);其一手技術演講「How we built Synchrony …」(YouTube,無法伺服器端擷取逐字,列為最佳待補一手來源)。
+
+### A.3 Notion
+
+- 〔NT-1〕 https://www.notion.com/blog/data-model-behind-notion —「Everything you see in Notion is a block. Text, images, lists, a row in a database, even pages themselves—these are all blocks …」
+- 〔NT-2〕 同上 —「Every block has the following attributes: ID … Properties … Type …」
+- 〔NT-3〕 同上 — Content=「an array (or ordered set) of block IDs representing the content inside this block」;Parent=「the block ID of the block's parent. The parent block is only used for permissions.」
+- 〔NT-4〕 同上 —「blocks can be nested inside of other blocks … The content attribute of a block is what stores the array of block IDs (or pointers) …」/「Instead, we use an 'upward pointer'—the parent attribute—for the permission system.」;API:https://developers.notion.com/reference/block(block 物件欄位 object/id/parent/type/has_children…)。
+- 〔NT-5〕 同上 —「these changes are expressed as operations that create or update a single record.」/「operations are batched into transactions that are committed (or rejected) by the server as a group.」
+- 〔NT-6〕 https://www.notion.com/blog/sharding-postgres-at-notion —「we settled on an architecture consisting of 480 logical shards evenly distributed across 32 physical databases.」/「we decided to partition by workspace ID.」/「each block belongs to exactly one workspace.」
+- 〔NT-7〕 https://www.notion.com/blog/the-great-re-shard —「tripling the number of instances in our fleet from 32 to 96 machines」/「We used built-in Postgres logical replication …」/「Total time to synchronize the machines decreased from 3 days to 12 hours!」/「no report or observation … of perceived user downtime」;「connection limits scaling our PgBouncer deployment」。
+- 〔NT-8〕 https://www.notion.com/blog/how-we-made-notion-available-offline —「pages that are marked as available offline are dynamically migrated to our new CRDT data model for conflict-resolution」/「reference tracking, background syncing, and rich-text conflict resolution」。
+- 〔NT-9〕 同上 —「For years, Notion has used SQLite to cache records locally and speed up page loads.」
+- 〔NT-10〕 同上 —「Each client tracks a lastDownloadedTimestamp for every offline page. On reconnect, we compare that timestamp with the server's lastUpdatedTime and only fetch pages where the server version is newer.」/「Clients subscribe to these channels … when they receive a message, they fetch the latest changes for the page.」
+- 〔NT-11〕 https://www.notion.com/blog/building-and-scaling-notions-data-lake —「use S3 as a data repository and lake … position data warehouse and other product-facing data stores such as ElasticSearch, Vector Database, Key-Value store … as its downstream」/「Debezium CDC connectors … Apache Hudi … Spark」/「more than two hundred billion blocks—a data volume of hundreds of terabytes」。
+- 〔NT-12〕 https://bigdataboutique.com/customers/notion(第三方 vendor case study,**二手**)—「migrating from a managed solution to an Elasticsearch deployment running on AWS EC2 instances」→ 僅作 live search 細節的弱佐證,附 caveat。
+- 〔NT-13〕 〔NT-11〕—權限「has to be constructed on the fly via expensive tree traversal computation」;「complex data processing logics like tree traversal and block data denormalization」。
+- 〔NT-附〕 presence/游標為產品功能但機制未公開;頁面歷史儲存格式未公開;線上並發精確語意未公開。
+
+---
+
+## Appendix B — 反證搜尋日誌(Refutation)
+
+每個載重的協作結論都做過一次以上「刻意找反例」的搜尋:
+
+- **Google Docs「是 OT 還是 CRDT?」** — 明確反證查詢。所有一手(Wave 白皮書〔GD-4〕、Google 專利〔GD-2〕)與二手一致指向 **OT**;無任一來源宣稱 Docs 用 CRDT。最強反面只是「OT 被批評易出 bug」(二手,批評複雜度而非改變分類)。**反證 Docs=OT 的嘗試落空,結論維持 OT。**
+- **Confluence「Synchrony 是 OT / CRDT / 都不是?」** — 同時做確認與反證。**確認失敗**:遍查 Atlassian 一手文件/部落格,**無一使用「operational transformation / OT / CRDT」自稱**;WebSearch 摘要宣稱「Synchrony 用 OT」無法回溯到任何開啟過的 Atlassian 頁,降級為 LEAD。**機制的最強一手是專利〔CF-12〕**(伺服器 edit-script,OT 家族、非 CRDT)。`conflictPolicy=abort`〔CF-10〕與「central source of truth」皆與去中心 CRDT 相反。**結論:OT 家族中央仲裁、非 CRDT、官方未指名——依證據而非印象。**
+- **Notion「是 OT 還是 CRDT?」** — 一手只明確兩點:線上 operation/transaction〔NT-5〕、離線 CRDT〔NT-8〕。二手流傳的「OT+CRDT hybrid / 純 CRDT / LWW」互相矛盾且無一手佐證,**全部拒採並列 UNKNOWN**,不為填格而選一個。
+
+---
+
+## Appendix C — UNKNOWN 清單與 closure recipe
+
+| 項目 | 系統 | 為何 UNKNOWN | closure recipe(read-only) |
 |---|---|---|---|
-| **Google Docs** | append-only op log:`[{Insert H@1},{Insert i@2},{Delete@2}]` | 從頭 replay | 字元級 OT(最細) |
-| **Notion** | 一堆 block row,靠 `content`/`parent` 串成樹 | 從 page block 遞迴收子 block | block/record 級整批交易 |
-| **Confluence (DC)** | 一份 XHTML 字串 `<p>Hello <strong>world</strong></p>` | 直接就是內容(整包讀出) | 需外掛 Synchrony 才有即時同編 |
+| 底層資料庫 / 二進位分離 / 快取 / 全文檢索引擎 | Google Docs | Google 從未公開 Docs 儲存棧 | 搜 Google 專利(assignee Google, 關鍵字 storage/Bigtable/Spanner);Google Cloud Next / SREcon Workspace 工程師演講;檢視 Drive API `files.get` 欄位與 `exportLinks` 看二進位分離訊號 |
+| 現行 wire protocol / per-doc 定序 / op-log 壓縮頻率 | Google Docs | 專有 | 對 docs.google.com 做網路擷取(DevTools WS/XHR 面板);比對開源 Closure `goog.net.BrowserChannel`;專利 US20160173594A1 / US10880372B2 |
+| Synchrony 演算法官方指名 | Confluence | Atlassian 文件從不指名 | 觀看 Haymo Meran「How we built Synchrony」演講逐字;搜 atlassian.com/engineering 的 Synchrony 架構文;細讀專利 US9355083B1 claims |
+| Cloud 資料庫/搜尋引擎、版本為快照或 diff | Confluence | Cloud 內部與 DB 欄位細節未全公開 | developer.atlassian.com Cloud platform architecture;開啟 Confluence Data Model 版本表段(CONTENT 版本列 / PREVVER 鏈) |
+| 線上並發精確語意(block 級 LWW?字元級?)、傳輸技術、CRDT 演算法、頁面歷史儲存 | Notion | 官方僅揭露 operation/transaction 與離線 CRDT | 追 notion.com/blog 後續協作/搜尋專文;網路擷取即時通道;查 Notion 是否公開 rich-text CRDT(Peritext 血緣)一手聲明 |
+| 圖片/檔案是否存 S3、伺服器端快取(Redis?) | Notion | 資料湖用 S3 為一手,但無「檔案存 S3」逐字 | 搜 notion.com/blog 快取/媒體專文;檢視 Notion 附件 URL 網域;Notion infra 工程師會議演講 |
 
 ---
 
-## 5. 重審準則(Re-confirm the Criteria)
-
-看完真實證據後,回頭檢查 §3 的量尺是否仍恰當——結論:**大體成立,但需補一條刻度**。
-
-- **原準則仍有效:** 「FACT/INFERENCE/UNKNOWN 三檔 + 反證搜尋」正是本 spike 最有價值處。真正把三家分開的,不是「誰功能多」,而是「哪些是官方證實、哪些是網路以訛傳訛」——例如若不做反證,幾乎必然會把「Notion=CRDT 協作」「Synchrony=OT」當成 FACT 寫進表裡,而兩者其實都不是一手可證的。
-- **需補一條刻度——區分 Server/DC vs Cloud。** 證據顯示 Confluence 的儲存/搜尋事實幾乎全來自**自管的 Server/Data Center 版**文件;**Cloud 版**的 DB/搜尋/物件儲存內部大多未公開。故表格已對 Confluence 明確標註適用版本,避免拿 DC 的 blob 模型去代表 Cloud(Cloud 用 ADF/JSON,不同)。這條刻度是準則接觸證據後才長出來的,比事前空想更強。
-
----
-
-## 6. 對照準則評估(Evaluate Against the Criteria)
-
-把 §3 量尺套到三系統,逐面向給評:
-
-### 6.1 Google Docs —— 三檔分布最「乾淨」的協作事實,但儲存後端全黑箱
-
-- **協作(D6–D9)全綠:** OT、字元級、中央伺服器仲裁、樂觀本地套用+一次一筆 pending change,全部一手 FACT,且來自同一組 2010 官方三部曲(作者 John Day-Richter,Google Software Engineer),我親自讀 PDF 影像逐字核對(見附錄 note)。`[A1]-[A5]`
-- **儲存後端(D2–D4)全黑箱:** Docs 用 Bigtable 還是 Spanner、搜尋用什麼、圖片放哪——**沒有一條 Google 一手來源證實**。網路上「Bigtable 存內容 chunk、Spanner 存 metadata」的說法全出自第三方系統設計站,經反證後降級 UNKNOWN。**評估:協作維度可信度極高;儲存維度誠實留白。**
-- **反證結果:** 「Google Docs 用 CRDT 而非 OT」查空——所有比較文皆確認 Docs 用 OT(常拿來與改用 CRDT 的 Figma 對比)。OT 結論穩固。
-
-### 6.2 Confluence —— 儲存事實最扎實(DC),協作演算法名稱是最大坑
-
-- **儲存(D1–D5)在 Server/DC 上最扎實:** 支援的 DB、BODYCONTENT/CONTENT 表、XHTML storage format、附件檔案系統/S3、Lucene/OpenSearch、全版本歷史——每一項都有官方 doc 逐字佐證,是三家中儲存維度一手覆蓋最完整的。
-- **最大坑在 D6:** 幾乎所有二手資料都說「Synchrony 用 OT」,但我實際打開 Atlassian 三個相關頁面(admin、server dev、cloud dev),**「operational transformation / OT / CRDT」字樣一次都沒出現**——官方只說「synchronizes data in real time」與「a graph of all edits」。**依準則第 3 條,這只能標 UNKNOWN**,closure recipe:轉錄 Atlassian 官方技術演講「How we built Synchrony」(YouTube,Haymo Meran)或找到官方工程 blog 明文。**評估:儲存維度 A 級;協作演算法維度誠實標 UNKNOWN,不隨大眾寫成 OT。**
-- **反證結果:** (a)「Lucene 是唯一引擎」被**部分推翻**——DC 8.9+ 可選 OpenSearch,但 Lucene 仍為預設;(b)「Synchrony 是 OT」——一手查空。
-
-### 6.3 Notion —— 一手素材最豐富(資料模型+分片),但「即時協作演算法」是全網最大誤解
-
-- **儲存(D1–D2, D10)一手素材最豐富:** everything-is-a-block、block=row、480 邏輯分片恆定(32×15 = 96×5 = 480)、workspace ID 分片鍵、VACUUM/TXID 動機、PgBouncer 零停機——數字我親自打開 sharding 一手文逐字核對,全部 FACT。這是三家中擴展性(D10)唯一有一手證據的。
-- **D6 是全網最大誤解:** 大量二手(系統設計部落格、廠商頁)斷言「Notion 用 CRDT(或 OT+CRDT hybrid)做百萬並發即時協作」。**經反證:Notion 唯一的一手 CRDT 陳述是 2025-12 離線文,且明確限定在「offline-marked pages」並稱之為「new」**——強烈暗示歷史線上路徑**不是** CRDT。線上官方只說「operations… batched into transactions that are committed (or rejected) by the server as a group」,既未提 OT 也未提 CRDT。**依準則,線上協作演算法只能標 UNKNOWN,行為上推為伺服器仲裁的整批交易(近 record 級 LWW)。**
-- **反證結果:** (a)「Notion 用 CRDT 做線上協作」——一手推翻,CRDT 僅離線;(b)「搜尋用 Elasticsearch」——一手查空,只有廠商二手;(c) 分片數字 480/32/96 潛在矛盾——由 data lake 文逐字調和一致(見 §7)。
-
-### 6.4 主線驗證:文件模型 → 協作演算法
-
-三系統正好構成一條「模型決定演算法」的光譜,證據完全支持:
-
-- **op log / 字元序列(Google)→ OT 字元級**:模型把文件拆到字元操作,OT 才有辦法做最細合併。
-- **block 樹(Notion)→ record/block 級整批交易**:操作單位是「create/update a single record」,協作精緻度自然停在 block 級。
-- **整份 blob(Confluence DC)→ 天生難即時,故外掛 Synchrony**:blob 模型無法原生字元級合併,即時能力是 2016 才用獨立服務補上的分離層。
-
----
-
-## 7. 直接回答與收尾(Answer & Wrap-up)
-
-**問:三者在架構取捨上各站在什麼位置、為什麼?**
-
-1. **Google Docs —— 為「即時字元級協作」不惜重寫儲存模型。** 它把文件本體改成 append-only op log(revision log),吃下 OT 的全部複雜度,換來三家中唯一由官方證實的字元級即時協作。代價/風險是:協作邏輯集中在中央伺服器仲裁,且其**儲存後端、搜尋、傳輸幾乎全不公開**——你能確知「它怎麼合併字元」,卻不能確知「它把 bytes 存哪」。取捨定位:**協作精緻度優先,儲存細節黑箱。**
-
-2. **Notion —— 為「靈活 block 工作區 + 巨量水平擴展」選了 block-per-row + Postgres 分片。** 「everything is a block、每 block 一列」讓產品極度靈活(文字、資料庫、頁面同構),但也讓它在 200B+ 列規模撞上 Postgres 的 VACUUM/TXID 天花板,於是有了公開的 480 邏輯分片史。協作上,它**沒有**走 Google 式字元級 OT;線上是整批交易的伺服器仲裁,CRDT 遲至 2025-12 才為**離線**補上。取捨定位:**模型靈活度與擴展性優先,即時協作精緻度讓位(近 block/record 級)。**
-
-3. **Confluence —— 為「企業自管、相容既有 RDBMS」把文件當 blob 存。** Server/DC 版把整頁當一份 XHTML storage format 字串存進 PostgreSQL/Oracle/SQL Server 等傳統關聯式資料庫,版本是全快照,搜尋是自管 Lucene(可選 OpenSearch),附件走檔案系統或 S3。即時協作是後來(Confluence 6.0, 2016)用**獨立服務 Synchrony** 外掛補上的能力層,走 WebSocket。取捨定位:**企業可自管、與傳統 DB/運維相容優先,即時協作是後補的分離層;其合併演算法官方甚至未公開名稱。**
-
-**一圖總結取捨象限:**
-- 協作即時/精緻度: **Google Docs(字元級,強) > Confluence(富文字即時,中) ≈ Notion 線上(block 級整批,中/弱)**;離線: **Notion(CRDT)** 反而最新最強。
-- 儲存/擴展一手透明度: **Notion(分片全公開)> Confluence(DC 儲存全公開)> Google Docs(後端全黑箱)**。
-- 三者無「誰全面最好」,只有**沿各自產品定位(消費級即時 / 企業自管 wiki / 靈活擴展工作區)做出的不同取捨**。
-
-**可行動收尾(給讀者):**
-- 若要引用「Notion 用 CRDT」或「Confluence Synchrony 用 OT」——**別引**,兩者非一手可證;要嘛標 UNKNOWN,要嘛先關掉下方 closure recipe。
-- 若後續要把某個 UNKNOWN 關掉,最高價值三條:(1) 轉錄「How we built Synchrony」演講以定 Confluence 演算法;(2) 等 Notion 承諾的 Search/RAG infra 一手文以定其搜尋引擎;(3) 抓 live Docs 網路流量(`/bind` 端點)以定 Google Docs 傳輸協定。皆為 read-only。
-
----
-
-## 附錄 — Evidence Appendix(取證下沉:URL + 逐字引文 + 日期)
-
-> 取證日期一律 **2026-07-18**。本 spike 親自打開並讀過的一手頁面清單如下,body 以 `[A#]` 回指。
-
-### Google Docs(2010 官方三部曲,作者 John Day-Richter, Google Software Engineer)
-
-> **來源可信度 note:** 三篇 2010 Google Drive Blog 原文在 `drive.googleblog.com` 以 JS 殼呈現,WebFetch 取不到 body。我改讀 University of Washington Interactive Data Lab 託管的**逐字重製 PDF**,並**親自以 Read 工具讀取 PDF 頁面影像逐字核對**:PDF 內含「Google Drive Blog」刊頭、原標題、日期(2010-09-21 / 09-22)、署名「Posted by: John Day-Richter, Software Engineer」,確認為原文忠實重製。PDF URL:`https://idl.uw.edu/future-scholarly-communication/files/2010-GoogleDocs-OT.pdf`。原始 canonical:`https://drive.googleblog.com/2010/09/whats-different-about-new-google-docs.html`(及 `_21`、`_22` 兩續篇)。
-
-- **[A1]** 文件=時序改動、伺服器持有完整 log + 當前狀態 — PDF 同上 — *"In the new editor, a document is stored as a series of chronological changes. A change might be something like {InsertText 'T' @10}."* / *"A fundamental difference between the new editor and the old one is that instead of computing the changes by comparing document versions, we now compute the versions by playing forward the history of changes."*
-- **[A2]** 三種操作 + append + replay;否決段落鎖 — 同上 — *"In Google documents, all edits boil down to three basic types of changes: inserting text, deleting text, and applying styles to a range of text. We save your document as a revision log consisting of a list of these changes… they are appending their change to the end of the revision log. To display a document, we replay the revision log from the beginning."* / *"you could lock paragraphs so that only one editor was ever allowed to type in a single paragraph at a given time. But locking paragraphs isn't a great solution…"*
-- **[A3]** OT 為演算法 + 轉換直覺 — 同上 — *"The algorithm that we use to handle these shifts is called operational transformation (OT). If OT is implemented correctly, it guarantees that once all editors have received all changes, everyone will be looking at the same version of the document."*
-- **[A4]** 字元級 — 同上 — *"Together, these technologies create the character-by-character collaboration in Google Docs."*
-- **[A5]** client-server、樂觀本地套用、每個 editor transform 收到的改動 — 同上 — *"Collaboration in Google Docs consists of sending changes from one editor to the server, and then to the other editors. Each editor transforms incoming changes so that they make sense relative to the local version of the document."*
-- **[A6]** (INFERENCE 佐證)Colossus 為 Google 產品普遍依賴 — `https://cloud.google.com/blog/products/storage-data-transfer/how-colossus-optimizes-data-placement-for-performance` — *"From YouTube and Gmail to BigQuery and Cloud Storage, almost all of Google's products depend on Colossus, our foundational distributed storage system."*(未點名 Docs,故 Docs 落於 Colossus 為 INFERENCE。)
-
-### Notion(全部 notion.com/blog 一手,親自打開)
-
-- **[A7]** block 模型 / 屬性 / content 陣列 / parent / loadPageChunk — `https://www.notion.com/blog/data-model-behind-notion`(canonical;`/data-model-behind-notions-flexibility` 會 404)— *"Everything you see in Notion is a block. Text, images, lists, a row in a database, even pages themselves—these are all blocks"* / *"an array (or ordered set) of block IDs representing the content inside this block"* / *"the block ID of the block's parent"* / *"loadPageChunk—it descends from a starting point (likely the block ID of a page block) down the content tree, and returns the blocks"*。頁內**未出現** "operational transformation" 或 "CRDT"(親自核對)。
-- **[A8]** 分片:480/32、VACUUM/TXID、五分鐘停機 — `https://www.notion.com/blog/sharding-postgres-at-notion` — *"480 logical shards evenly distributed across 32 physical databases"* / *"Physical database (32 total) → Logical shard, represented as a Postgres schema (15 per database, 480 total) → block table (1 per logical shard, 480 total)"* / *"Each block belongs to exactly one workspace, we used the workspace ID as the partition key."* / *"the Postgres VACUUM process began to stall consistently, preventing the database from reclaiming disk space from dead tuples"* / *"transaction ID (TXID) wraparound… Postgres would stop processing all writes"* / *"we took Notion down for five minutes of scheduled maintenance."*
-- **[A9]** re-shard 32→96、每 shard schema 15→5 — `https://www.notion.com/blog/the-great-re-shard` — *"tripling the number of instances in our fleet from 32 to 96 machines"* / *"we went from having 15 schemas per shard to 5"*(發佈 2023-07-17)。
-- **[A10]** PostgreSQL source-of-truth / 整批交易 / S3 data lake / Debezium-Kafka-Hudi-Spark / 480 恆定調和 / 200B blocks — `https://www.notion.com/blog/building-and-scaling-notions-data-lake` & `[A7]` — *"operations are batched into transactions that are committed (or rejected) by the server as a group"* `[A7]`;*"SaveTransaction's main job is to get your data into our source-of-truth databases, which store all block data"* `[A7]`;data lake 文:*"horizontally sharding our Postgres database into 32 physical instances"* / *"increasing the number of physical instances to 96, with five logical shards per instance. Thus we maintained a total of 480 logical shards"* / *"use S3 as a data repository and lake to store all raw and processed data"* / *"Notion's in-house data lake is built on Debezium CDC connector, Kafka, Hudi, Spark, and S3"* / *"more than 20 billion block rows… grown to more than two hundred billion blocks"* / (搜尋)*"Stay tuned for a detailed post on our Search and AI Embedding RAG Infra…"*(→ 搜尋引擎 UNKNOWN)。
-- **[A11]** CRDT 僅離線 / SQLite 本地快取 / channels 訂閱 — `https://www.notion.com/blog/how-we-made-notion-available-offline`(2025-12-11)— *"pages that are marked as available offline are dynamically migrated to our new CRDT data model for conflict-resolution"* / *"For years, Notion has used SQLite to cache records locally and speed up page loads."* / *"Notion's unique block architecture meant we had to solve several challenging problems around reference tracking, background syncing, and rich-text conflict resolution."* / *"Clients subscribe to these channels for each of their offline pages, and when they receive a message, they fetch the latest changes for the page."* 頁內**未出現** "operational transformation"(親自核對)。
-
-### Confluence(親自打開;標明版本 DC 10.2)
-
-- **[A12]** storage format 是 XHTML/XML — `https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html` — *"This page describes the XHTML-based format that Confluence uses to store the content of pages, page templates, blueprints, blog posts, and comments."* / *"Technically, it's XML, since the storage format doesn't fully comply with the XHTML definition."*
-- **[A13]** BODYCONTENT / CONTENT 資料模型 — `https://confluence.atlassian.com/doc/confluence-data-model-127369837.html` — BODYCONTENT: *"The content of Confluence pages. No version information or other metadata is stored here. That is all in the content table."*;CONTENT: *"A persistence table for the ContentEntityObject class of objects."*
-- **[A14]** 全版本 + 還原=複製 — `https://confluence.atlassian.com/doc/page-history-and-page-comparison-views-139379.html` — *"Confluence tracks the history of changes to each page by creating a new version of the page each time it's modified."* / *"restoring an older version creates a copy of that version."* / *"if you restore version 39, Confluence will create a copy of version 39 and the copy will become the new, current version."*
-- **[A15]** 附件:檔案系統預設 / S3(8.1)/ DB-WebDAV 停用 — `https://confluence.atlassian.com/doc/attachment-storage-configuration-166876.html` — *"By default, Confluence stores attachments in the attachments directory within the configured Confluence home folder."* / *"Starting from Confluence 8.1, you can also store your attachment data on Amazon S3 object storage."* / *"These storage methods are no longer supported."*(指 DB/WebDAV)
-- **[A16]** Synchrony / change log graph / WebSocket→XHR — `https://confluence.atlassian.com/doc/administering-collaborative-editing-858772086.html` — *"Collaborative editing is powered by Synchrony which synchronizes data in real time."* / *"Each page and blog post has its own Synchrony change log, which contains a graph of all edits to that page or blog post."* / *"For best results, your load balancer and proxies should allow WebSocket connections. If your users cannot get a WebSocket connection, Confluence will fall back to an XML HTTP Request (XHR)…"* **頁內未出現 "operational transformation"/"OT"/"CRDT"(親自核對)→ D6 演算法 UNKNOWN。**
-- **[A17]** Lucene 預設 + OpenSearch opt-in — `https://confluence.atlassian.com/doc/content-index-administration-148844.html`(*"By default, Confluence uses Lucene for indexing."* / index 落於 `<home-directory>/index`)& `https://confluence.atlassian.com/doc/configuring-opensearch-for-confluence-1387594125.html`(*"Confluence Data Center now offers an alternative search engine as an opt-in feature — OpenSearch"*;預設 `search.platform=lucene`)。
-- **[A18]** Cloud:WebSocket 對 Synchrony 開 session + 定期存 snapshot;Cloud 編輯器即時同編 — `https://developer.atlassian.com/cloud/confluence/collaborative-editing/`(*"A web socket session is opened to Synchrony using the provided JWT and the contentId of the page being edited"* / *"Confluence will continue storing a snapshot of the most recent state of the document being edited at regular intervals"*)& `https://support.atlassian.com/confluence-cloud/docs/learn-about-the-atlassian-cloud-editor/`(*"The cloud editor allows you and other users to edit a page or live doc simultaneously…"*)。
-
-### 反證搜尋(Adversarial)彙整
-
-| # | 反證查詢 | 結果 |
-|---|---|---|
-| R1 | Google Docs 用 CRDT 而非 OT? | **查空**;一手/比較文皆確認 OT。OT 結論穩固。 |
-| R2 | Google Docs 後端是 Bigtable/Spanner? | **一手查空**;僅二手臆測 → D2 UNKNOWN。 |
-| R3 | Confluence 搜尋 Lucene vs Elasticsearch/OpenSearch? | **部分推翻**:Lucene 仍預設,但 DC 8.9+ 可選 OpenSearch。 |
-| R4 | Synchrony 是 OT 還是 CRDT? | **一手查空**;三個 Atlassian 頁皆未提演算法名 → D6 UNKNOWN。 |
-| R5 | Notion 線上用 CRDT/OT? | **一手推翻**:CRDT 僅離線(2025-12「new」);線上僅「整批交易」。 |
-| R6 | Notion 搜尋用 Elasticsearch? | **一手查空**;僅廠商二手 → D4 UNKNOWN。 |
-| R7 | Notion 分片數字 480/32/96 是否矛盾? | **調和一致**:32×15 = 96×5 = 480(data lake 文逐字確認)。 |
-
-### UNKNOWN 清單與 closure recipe(read-only)
-
-- **Google Docs D2/D3/D4/D8/D9(後端 DB、圖片儲存、搜尋引擎、傳輸協定、游標 UI):** 查 Google Research/OSDI/SOSP 有無 Docs/Workspace 一手論文;抓 live `docs.google.com` 網路流量看 `/bind`、`/save` 端點判傳輸;找 Workspace 工程演講。
-- **Confluence D6(Synchrony 演算法):** 轉錄官方演講「How we built Synchrony」(YouTube, Haymo Meran)或找官方工程 blog 明文;在此之前 OT 只能當二手 inference。
-- **Confluence Cloud 儲存/搜尋/物件儲存:** 找 developer.atlassian.com 的 Media API / Cloud 資料架構文(多半未公開至列級)。
-- **Notion D4(搜尋引擎)/ D2 欄位編碼 / 伺服器快取 / 線上傳輸:** 等官方承諾的 Search & RAG infra 一手文;或官方 schema/infra 演講。
-
----
-
-*Facts / Inferences / Unknowns 已於每格標示;凡標 UNKNOWN 者皆附 closure recipe。本 spike 未修改任何原始碼、未 commit、未開 PR。*
+*本文獨立取證,未沿用任何既有筆記;所有外部主張均附 URL + 逐字引文 + 擷取日期(2026-07-19),證據等級以 FACT / INFERENCE / UNKNOWN 標記,承重協作結論均附反證日誌(Appendix B)。*

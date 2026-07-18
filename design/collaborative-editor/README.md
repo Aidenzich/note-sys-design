@@ -3,7 +3,7 @@
 > 來源:2026-07-16 的 read-only 調查(所有外部引文擷取日期 = 2026-07-16,除另註;皆為官方一手來源)。
 > 正文維持 finding 高度;原始逐字引文全部收在附錄,以〔G#〕〔C#〕〔S#〕anchor 引用。
 > 不熟悉這個領域?先讀 **§1.3 文件模型入門**(四種儲存形式各附具體例子),再回來看比較。
-> 姊妹篇:[三系統版(+ Notion)](./trio-comparison.md) —— 獨立重新取證,含 Notion 的 block 樹/分片史,以及「Notion 用 CRDT 做即時協作」「Synchrony 是 OT」兩則流言的反證。
+> 姊妹篇:[三系統版(+ Notion)](./trio-comparison.md) —— 獨立重新取證,含 Notion 的 block 樹/分片史、「Notion 用 CRDT 做即時協作」的流言反證(CRDT 僅離線路徑),以及 Synchrony 協作機制的專利級考證(伺服器仲裁 rebase、OT 家族、明確非 CRDT —— 但 Atlassian 官方從不指名)。
 
 ---
 
