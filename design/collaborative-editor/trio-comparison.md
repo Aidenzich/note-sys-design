@@ -7,7 +7,7 @@
 
 ---
 
-## TL;DR(先給答案)
+## TL;DR
 
 三個系統看起來都是「多人一起編一份文件」,但**文件模型(document model)決定了一切下游取捨**——存哪種資料庫、能不能字元級即時協作、能不能離線、怎麼分片。一句話定位:
 
@@ -19,7 +19,7 @@
 
 ---
 
-## 1. Introduction(引言:目的、問題、面向)
+## 1. Introduction
 
 ### 1.1 這份 spike 的目的(Purpose)
 
@@ -41,7 +41,7 @@
 
 ---
 
-## 2. Prerequisites(前置知識:先教再用)
+## 2. Prerequisites
 
 以下是後文論證會反覆倚賴的名詞與**結構性概念**。承重的結構性概念都附最小可寫實例(fenced code block),先教一次,後面才用。
 
@@ -112,7 +112,7 @@ OT 需要一個中央權威決定順序;Google Docs、以及(OT 家族的)Conflu
 
 ---
 
-## 3. Methodology(方法論:比較的量尺)
+## 3. Methodology
 
 「這類編輯系統該怎麼比」的 rubric。以下每個面向都給出**判準**(要看什麼、什麼算好),先立在證據之前;§5 會在看過真實證據後重新檢視這把尺。
 
@@ -141,7 +141,7 @@ OT 需要一個中央權威決定順序;Google Docs、以及(OT 家族的)Conflu
 
 ---
 
-## 4. Findings(發現:逐系統取證 + 三欄比較表)
+## 4. Findings
 
 本節於 finding 高度陳述;逐字引文與來源清單見 Appendix A,反證日誌見 Appendix B。
 
@@ -205,7 +205,7 @@ OT 需要一個中央權威決定順序;Google Docs、以及(OT 家族的)Conflu
 
 ---
 
-## 5. Discussion(討論:重審量尺 + 依尺評估)
+## 5. Discussion
 
 ### 5.1 重審 rubric(看過證據後,這把尺還量對東西嗎?)
 
@@ -237,7 +237,7 @@ OT 需要一個中央權威決定順序;Google Docs、以及(OT 家族的)Conflu
 
 ---
 
-## 6. Conclusion(結論:直接回答原問題)
+## 6. Conclusion
 
 **原問題:三者在架構取捨上各站在什麼位置、為什麼?** 依 §4.4 三欄表與 §5 的評估,直接回答:
 
